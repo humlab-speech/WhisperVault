@@ -13,13 +13,16 @@ WORKDIR /app
 # copy entire repository first so pip install can see the package code
 COPY . /app
 
-# install project and dependencies
-RUN pip install --no-cache-dir .
+# install project and API-server dependencies
+RUN pip install --no-cache-dir . fastapi 'uvicorn[standard]' python-multipart
 
 # download NLTK data needed for alignment so the container can run offline
 RUN python -c "import nltk; nltk.download('punkt', download_dir='/usr/local/nltk_data'); nltk.download('punkt_tab', download_dir='/usr/local/nltk_data')"
 
-# ensure entrypoint script is executable
-RUN chmod +x /app/container/manage.py
+# ensure scripts are executable
+RUN chmod +x /app/container/server.py /app/container/manage.py
 
-ENTRYPOINT ["/app/container/manage.py"]
+# server.py is the container entrypoint (listens on a Unix Domain Socket).
+# manage.py is the HOST-SIDE management script; it is also present inside
+# the image but is not invoked by default.
+ENTRYPOINT ["/app/container/server.py"]
