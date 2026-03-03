@@ -10,11 +10,14 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# copy entire repository first so pip install can see the package code
-COPY . /app
+# copy only what the container actually needs:
+#   whisperx/  – the Python package to install
+#   container/ – server.py entrypoint (and manage.py for reference)
+COPY whisperx/ /app/whisperx/
+COPY container/ /app/container/
 
-# install whisperx (lives in the whisperx/ subdirectory) and API-server deps
-RUN pip install --no-cache-dir ./whisperx fastapi 'uvicorn[standard]' python-multipart
+# install whisperx and API-server dependencies
+RUN pip install --no-cache-dir /app/whisperx fastapi 'uvicorn[standard]' python-multipart
 
 # download NLTK data needed for alignment so the container can run offline
 RUN python -c "import nltk; nltk.download('punkt', download_dir='/usr/local/nltk_data'); nltk.download('punkt_tab', download_dir='/usr/local/nltk_data')"
