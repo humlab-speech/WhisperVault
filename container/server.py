@@ -63,11 +63,13 @@ import numpy as np
 import torch
 
 # ── configure caches before any whisperx import ──────────────────────────────
+# /models/hf   → the HF hub cache (host ~/.cache/huggingface/hub mounted here)
+# /models/extra → project models dir (torch cache, alignment models, etc.)
 os.environ.setdefault("HF_HOME", "/models/hf")
 os.environ.setdefault("HF_HUB_CACHE", "/models/hf")
-os.environ.setdefault("XDG_CACHE_HOME", "/models/cache")
+os.environ.setdefault("XDG_CACHE_HOME", "/models/extra/cache")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-os.environ.setdefault("TORCH_HOME", "/models/cache/torch")
+os.environ.setdefault("TORCH_HOME", "/models/extra/cache/torch")
 if os.environ.get("OFFLINE", "1") != "0":
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
