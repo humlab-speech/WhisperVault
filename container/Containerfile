@@ -1,0 +1,25 @@
+# Containerfile for whisperx offline transcription
+# Build with: podman build -t whisperx-local -f container/Containerfile .
+
+FROM python:3.12-slim
+
+# system dependencies required by whisperx
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# copy entire repository first so pip install can see the package code
+COPY . /app
+
+# install project and dependencies
+RUN pip install --no-cache-dir .
+
+# download NLTK data needed for alignment so the container can run offline
+RUN python -c "import nltk; nltk.download('punkt', download_dir='/usr/local/nltk_data'); nltk.download('punkt_tab', download_dir='/usr/local/nltk_data')"
+
+# ensure entrypoint script is executable
+RUN chmod +x /app/container/manage.py
+
+ENTRYPOINT ["/app/container/manage.py"]
