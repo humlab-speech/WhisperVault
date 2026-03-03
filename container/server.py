@@ -9,6 +9,7 @@ host so the host can connect without any TCP networking.
 Endpoints
 ---------
 GET  /health       → model status and config
+GET  /params       → full parameter schema for /transcribe and /reload
 POST /transcribe   → multipart: audio=<binary>, params=<JSON>
 POST /reload       → JSON body – reload model with new config
 
@@ -328,6 +329,306 @@ async def health():
         "vad_method": _config.vad_method if _config else None,
         "align_models_cached": list(_align_models.keys()),
         "diarize_pipelines_cached": list(_diarize_pipelines.keys()),
+    }
+
+
+# ── parameter schema (static, used by /params) ────────────────────────────────
+
+# Per-request parameters accepted by POST /transcribe (the `params` JSON field).
+# These are intentionally NOT part of ModelConfig – they are evaluated fresh on
+# every request, so no reload is needed when they change.
+_TRANSCRIBE_PARAMS: dict = {
+    "language": {
+        "type": "string | null",
+        "default": None,
+        "description": (
+            "ISO-639-1 language code (e.g. 'sv', 'en', 'de'). "
+            "Pass null or omit to enable automatic language detection. "
+            "Overrides the server-level default set at startup."
+        ),
+    },
+    "task": {
+        "type": "string",
+        "default": "transcribe",
+        "enum": ["transcribe", "translate"],
+        "description": (
+            "'transcribe' returns text in the source language. "
+            "'translate' forces English output regardless of input language. "
+            "Forced alignment is skipped when task='translate'."
+        ),
+    },
+    "batch_size": {
+        "type": "int",
+        "default": 8,
+        "description": "Number of audio chunks processed in parallel during ASR inference. "
+                       "Lower values reduce peak memory use; higher values may improve speed on GPU.",
+    },
+    "chunk_size": {
+        "type": "int",
+        "default": 30,
+        "description": "VAD chunk length in seconds. Longer chunks give the model more context "
+                       "but increase latency and memory use.",
+    },
+    "no_align": {
+        "type": "bool",
+        "default": False,
+        "description": "Skip forced alignment. Segments will have sentence-level start/end "
+                       "timestamps only; the 'words' array will be absent.",
+    },
+    "align_model": {
+        "type": "string | null",
+        "default": None,
+        "description": "HuggingFace model ID to use for forced alignment. "
+                       "Defaults to the best available model for the detected language.",
+    },
+    "interpolate_method": {
+        "type": "string",
+        "default": "nearest",
+        "enum": ["nearest", "linear", "ignore"],
+        "description": "How to assign timestamps to words that fall in silent gaps between "
+                       "aligned segments.",
+    },
+    "return_char_alignments": {
+        "type": "bool",
+        "default": False,
+        "description": "Include character-level alignment timestamps in each word entry.",
+    },
+    "diarize": {
+        "type": "bool",
+        "default": False,
+        "description": "Run speaker diarization after transcription. Each segment will gain a "
+                       "'speaker' field (e.g. 'SPEAKER_00'). Requires the pyannote diarization "
+                       "model to be available in the model cache.",
+    },
+    "min_speakers": {
+        "type": "int | null",
+        "default": None,
+        "description": "Minimum number of speakers to assume during diarization. "
+                       "Only used when diarize=true.",
+    },
+    "max_speakers": {
+        "type": "int | null",
+        "default": None,
+        "description": "Maximum number of speakers to assume during diarization. "
+                       "Only used when diarize=true.",
+    },
+    "diarize_model": {
+        "type": "string",
+        "default": "pyannote/speaker-diarization-community-1",
+        "description": "HuggingFace model ID for the diarization pipeline. "
+                       "Only used when diarize=true.",
+    },
+    "speaker_embeddings": {
+        "type": "bool",
+        "default": False,
+        "description": "Return per-speaker embedding vectors alongside segment annotations. "
+                       "Only used when diarize=true.",
+    },
+    "output_format": {
+        "type": "string | list[string]",
+        "default": "all",
+        "enum": ["all", "txt", "srt", "vtt", "tsv", "json", "aud"],
+        "description": (
+            "Which output format(s) to include in the response 'outputs' dict. "
+            "'all' returns every format. "
+            "Pass a list (e.g. ['srt','txt']) for multiple specific formats. "
+            "Formats: txt=plain text, srt=SubRip subtitles, vtt=WebVTT subtitles, "
+            "tsv=tab-separated with timestamps, json=full segment JSON, "
+            "aud=Audacity label track."
+        ),
+    },
+    "highlight_words": {
+        "type": "bool",
+        "default": False,
+        "description": "Underline each word at the moment it is spoken in SRT/VTT output. "
+                       "Requires word-level alignment (no_align must be false).",
+    },
+    "max_line_width": {
+        "type": "int | null",
+        "default": None,
+        "description": "Wrap subtitle lines at this many characters. Null = no wrapping.",
+    },
+    "max_line_count": {
+        "type": "int | null",
+        "default": None,
+        "description": "Maximum number of lines per subtitle block. Null = no limit.",
+    },
+    "verbose": {
+        "type": "bool",
+        "default": False,
+        "description": "Enable verbose logging inside the container during transcription.",
+    },
+    "print_progress": {
+        "type": "bool",
+        "default": False,
+        "description": "Log segment-by-segment progress to the container stdout.",
+    },
+}
+
+
+def _model_config_schema() -> dict:
+    """
+    Build a parameter schema for POST /reload by introspecting ModelConfig.
+
+    Returns a dict of field_name → {type, default, env_var, description} derived
+    directly from the dataclass so it can never drift out of sync with the code.
+    """
+    # Human-readable descriptions and env-var names for each ModelConfig field.
+    # Fields absent from this map will still appear in the output but without a
+    # description or env_var hint.
+    _meta: dict[str, dict] = {
+        "model":           {"env": "WHISPERX_MODEL",
+                            "description": "Whisper model name or HuggingFace repo ID "
+                                           "(e.g. 'small', 'large-v2', 'KBLab/kb-whisper-large')."},
+        "device":          {"env": "WHISPERX_DEVICE",      "enum": ["cpu", "cuda"],
+                            "description": "Compute device. Use 'cpu' unless a CUDA GPU is available."},
+        "device_index":    {"env": "WHISPERX_DEVICE_INDEX",
+                            "description": "GPU device index when device='cuda'."},
+        "compute_type":    {"env": "WHISPERX_COMPUTE_TYPE",
+                            "enum": ["default", "float16", "float32", "int8"],
+                            "description": "Quantisation precision. 'float32' is safest on CPU; "
+                                           "'float16' or 'int8' for faster GPU inference."},
+        "language":        {"env": "WHISPERX_LANGUAGE",
+                            "description": "ISO-639-1 language code baked in at model-load time. "
+                                           "Can also be overridden per-request without a reload."},
+        "batch_size":      {"env": "WHISPERX_BATCH_SIZE",
+                            "description": "Default batch size used when not overridden per-request."},
+        "threads":         {"env": "WHISPERX_THREADS",
+                            "description": "Number of CPU threads allocated to PyTorch."},
+        "model_dir":       {"env": "WHISPERX_MODEL_DIR",
+                            "description": "Custom directory for model downloads. "
+                                           "Null = use the default HF/torch cache."},
+        "hf_token":        {"env": "HF_TOKEN",
+                            "description": "HuggingFace access token for gated models "
+                                           "(e.g. pyannote diarization). Not logged."},
+        "beam_size":       {"env": "WHISPERX_BEAM_SIZE",
+                            "description": "Beam search width. Higher = better accuracy, slower."},
+        "best_of":         {"env": "WHISPERX_BEST_OF",
+                            "description": "Number of candidates sampled when temperature > 0."},
+        "patience":        {"env": "WHISPERX_PATIENCE",
+                            "description": "Beam search patience factor."},
+        "length_penalty":  {"env": "WHISPERX_LENGTH_PENALTY",
+                            "description": "Exponential length penalty applied to beam scores."},
+        "temperature":     {"env": "WHISPERX_TEMPERATURE",
+                            "description": "Sampling temperature. 0 = greedy / beam search."},
+        "temperature_increment_on_fallback": {
+                            "env": "WHISPERX_TEMP_INCREMENT",
+                            "description": "Temperature step used when the model falls back due to "
+                                           "high compression ratio or low log-probability. "
+                                           "Null disables fallback."},
+        "compression_ratio_threshold": {
+                            "env": "WHISPERX_COMPRESSION_THR",
+                            "description": "If the gzip compression ratio of the output exceeds "
+                                           "this value the segment is considered failed and "
+                                           "temperature fallback is triggered."},
+        "logprob_threshold":{"env": "WHISPERX_LOGPROB_THR",
+                            "description": "Average log-probability threshold below which "
+                                           "temperature fallback is triggered."},
+        "no_speech_threshold": {
+                            "env": "WHISPERX_NO_SPEECH_THR",
+                            "description": "If the no-speech probability exceeds this value the "
+                                           "segment is treated as silence."},
+        "suppress_tokens": {"env": "WHISPERX_SUPPRESS_TOKENS",
+                            "description": "Comma-separated list of token IDs to suppress. "
+                                           "'-1' suppresses the default set of special tokens."},
+        "suppress_numerals": {
+                            "env": "WHISPERX_SUPPRESS_NUMERALS",
+                            "description": "Replace numeric digits with their spoken-word forms."},
+        "condition_on_previous_text": {
+                            "env": "WHISPERX_CONDITION_ON_PREV",
+                            "description": "Feed the previous segment's text as a prompt for "
+                                           "the next segment. Can improve continuity but risks "
+                                           "hallucination loops on long files."},
+        "initial_prompt":  {"env": "WHISPERX_INITIAL_PROMPT",
+                            "description": "Text prepended as context before the first segment. "
+                                           "Useful for domain-specific vocabulary."},
+        "hotwords":        {"env": "WHISPERX_HOTWORDS",
+                            "description": "Space-separated hotwords boosted during decoding."},
+        "vad_method":      {"env": "WHISPERX_VAD_METHOD", "enum": ["pyannote", "silero"],
+                            "description": "Voice Activity Detection backend. 'pyannote' gives "
+                                           "better accuracy; 'silero' is lighter and faster."},
+        "vad_onset":       {"env": "WHISPERX_VAD_ONSET",
+                            "description": "VAD probability threshold to start a speech segment."},
+        "vad_offset":      {"env": "WHISPERX_VAD_OFFSET",
+                            "description": "VAD probability threshold to end a speech segment."},
+        "chunk_size":      {"env": "WHISPERX_CHUNK_SIZE",
+                            "description": "Default VAD chunk length in seconds. "
+                                           "Can also be overridden per-request without a reload."},
+    }
+
+    schema: dict = {}
+    defaults = dataclasses.asdict(ModelConfig())
+    for f in dataclasses.fields(ModelConfig):
+        entry: dict = {"type": str(f.type) if isinstance(f.type, str) else type(defaults[f.name]).__name__}
+        entry["default"] = defaults[f.name]
+        meta = _meta.get(f.name, {})
+        if "env" in meta:
+            entry["env_var"] = meta["env"]
+        if "enum" in meta:
+            entry["enum"] = meta["enum"]
+        if "description" in meta:
+            entry["description"] = meta["description"]
+        schema[f.name] = entry
+    return schema
+
+
+@app.get("/params")
+async def params():
+    """
+    Describe the parameters accepted by POST /transcribe and POST /reload.
+
+    This endpoint exists so that clients (including automated agents) can
+    discover the full API surface without consulting external documentation.
+
+    Response fields
+    ---------------
+    transcribe_params
+        Per-request options sent as the `params` JSON string in the
+        /transcribe multipart body.  These take effect immediately on
+        every call; no reload is needed.
+
+    reload_params
+        Fields accepted by POST /reload.  These are baked into the ASR
+        model at load time.  Changing them requires a reload (which
+        briefly makes the server unavailable while the model is swapped).
+        The current live values are included alongside the defaults so a
+        client can show what is currently active.
+
+    output_formats
+        The set of strings valid for the `output_format` transcribe param.
+
+    notes
+        Human-readable guidance on the distinction between the two param
+        sets and other caveats.
+    """
+    current_values = dataclasses.asdict(_config) if _config else {}
+    reload_schema = _model_config_schema()
+    # Annotate each reload param with its current live value
+    for key, entry in reload_schema.items():
+        if key in current_values:
+            entry["current_value"] = current_values[key]
+
+    return {
+        "transcribe_params": _TRANSCRIBE_PARAMS,
+        "reload_params": reload_schema,
+        "output_formats": ALL_FORMATS,
+        "notes": {
+            "transcribe_params_usage": (
+                "Send as a JSON-encoded string in the 'params' multipart field of "
+                "POST /transcribe.  Example: "
+                'params={"language":"sv","diarize":true,"output_format":"srt"}'
+            ),
+            "reload_params_usage": (
+                "Send as a JSON object body to POST /reload.  Include only the fields "
+                "you want to change; omitted fields keep their current value.  "
+                "The server will be briefly unavailable while the model reloads."
+            ),
+            "overlap": (
+                "Some fields (language, batch_size, chunk_size) exist in both sets. "
+                "The reload version sets the server-wide default; the transcribe version "
+                "overrides it for a single request only."
+            ),
+        },
     }
 
 

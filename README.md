@@ -233,6 +233,49 @@ Returns the current server state.  Useful for liveness/readiness checks.
 
 ---
 
+### `GET /params`
+
+Returns the complete parameter schema for both `/transcribe` and `/reload` as a machine-readable
+JSON document.  Useful for clients and automated agents that need to discover the API surface
+without consulting external documentation.
+
+```bash
+curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/params
+# or via nginx:
+curl http://localhost:8088/params
+```
+
+**Response** `200 OK` (abbreviated):
+```json
+{
+  "transcribe_params": {
+    "language":   { "type": "string | null", "default": null, "description": "..." },
+    "diarize":    { "type": "bool",          "default": false, "description": "..." },
+    "output_format": { "type": "string | list[string]", "default": "all",
+                       "enum": ["all","txt","srt","vtt","tsv","json","aud"],
+                       "description": "..." }
+  },
+  "reload_params": {
+    "model":      { "type": "str", "default": "small", "current_value": "KBLab/kb-whisper-large",
+                    "env_var": "WHISPERX_MODEL", "description": "..." },
+    "beam_size":  { "type": "int", "default": 5,       "current_value": 5,
+                    "env_var": "WHISPERX_BEAM_SIZE", "description": "..." }
+  },
+  "output_formats": ["txt", "srt", "vtt", "tsv", "json", "aud"],
+  "notes": {
+    "transcribe_params_usage": "Send as a JSON-encoded string in the 'params' multipart field ...",
+    "reload_params_usage":     "Send as a JSON object body to POST /reload ...",
+    "overlap":                 "Some fields exist in both sets; the reload version sets the "
+                               "server-wide default, the transcribe version overrides for one request."
+  }
+}
+```
+
+`reload_params` entries always include a `current_value` field showing what is actually loaded
+right now, which differs from `default` when the server was started with non-default flags.
+
+---
+
 ### `POST /transcribe`
 
 Multipart form upload.  The two fields are:
