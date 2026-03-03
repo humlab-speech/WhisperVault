@@ -233,6 +233,72 @@ Returns the current server state.  Useful for liveness/readiness checks.
 
 ---
 
+### `GET /models`
+
+Scans the HuggingFace hub cache (`/models/hf` inside the container) and returns every model found,
+classified by its role in the whisperx pipeline.
+
+```bash
+curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/models
+# or via nginx:
+curl http://localhost:8088/models
+```
+
+**Response** `200 OK` (abbreviated):
+```json
+{
+  "available": [
+    {
+      "model_id": "KBLab/kb-whisper-large",
+      "cache_path": "/models/hf/models--KBLab--kb-whisper-large",
+      "role": "asr",
+      "loaded": true,
+      "description": "Swedish-optimised Whisper large model ...",
+      "languages": ["sv"],
+      "architecture": "faster-whisper"
+    },
+    {
+      "model_id": "pyannote/speaker-diarization-community-1",
+      "role": "diarization",
+      "loaded": false
+    }
+  ],
+  "by_role": {
+    "asr":         [ ... ],
+    "alignment":   [ ... ],
+    "diarization": [ ... ],
+    "vad":         [ ... ],
+    "embedding":   [ ... ]
+  },
+  "currently_loaded": {
+    "asr": "KBLab/kb-whisper-large",
+    "alignment": ["sv"],
+    "diarization": []
+  }
+}
+```
+
+**Roles:**
+
+| Role | Meaning |
+|---|---|
+| `asr` | Can be passed as `model` to `POST /reload` or `manage.py start --model` |
+| `alignment` | Forced-alignment model; selected automatically by detected language |
+| `diarization` | Speaker diarization pipeline; selectable via `diarize_model` in `/transcribe` |
+| `vad` | VAD backbone used internally when `vad_method=pyannote` |
+| `embedding` | Speaker embedding model used internally by the diarization pipeline |
+| `unknown` | Present in the cache but not in the server's known-model registry |
+
+To switch to a different ASR model that is listed under `role=asr`, use `POST /reload`:
+```bash
+curl --unix-socket /tmp/whisperx-api/whisperx.sock \
+    -X POST http://localhost/reload \
+    -H 'Content-Type: application/json' \
+    -d '{"model": "openai/whisper-large-v3"}'
+```
+
+---
+
 ### `GET /params`
 
 Returns the complete parameter schema for both `/transcribe` and `/reload` as a machine-readable

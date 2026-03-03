@@ -9,6 +9,7 @@ host so the host can connect without any TCP networking.
 Endpoints
 ---------
 GET  /health       → model status and config
+GET  /models       → inventory of models available in the mounted caches
 GET  /params       → full parameter schema for /transcribe and /reload
 POST /transcribe   → multipart: audio=<binary>, params=<JSON>
 POST /reload       → JSON body – reload model with new config
@@ -329,6 +330,187 @@ async def health():
         "vad_method": _config.vad_method if _config else None,
         "align_models_cached": list(_align_models.keys()),
         "diarize_pipelines_cached": list(_diarize_pipelines.keys()),
+    }
+
+
+# ── model inventory (used by /models) ────────────────────────────────────────
+
+# Static metadata for models that may be present in the caches.
+# Keys are HuggingFace model IDs exactly as you would pass to --model.
+# role:
+#   "asr"         – can be passed as the 'model' field to /reload or manage.py start
+#   "alignment"   – used automatically by whisperx for forced word alignment
+#   "diarization" – can be passed as 'diarize_model' in /transcribe params
+#   "vad"         – used internally by the VAD pipeline (not user-selectable directly)
+#   "embedding"   – used internally by the diarization pipeline
+_MODEL_METADATA: dict[str, dict] = {
+    # ── ASR models ──────────────────────────────────────────────────────────
+    "KBLab/kb-whisper-large": {
+        "role": "asr",
+        "architecture": "faster-whisper",
+        "languages": ["sv"],
+        "description": (
+            "Swedish-optimised Whisper large model fine-tuned by KBLab (National Library "
+            "of Sweden).  Best accuracy for Swedish speech.  Use compute_type=float32 on "
+            "CPU or float16 on GPU."
+        ),
+    },
+    "openai/whisper-large-v2": {
+        "role": "asr",
+        "architecture": "faster-whisper",
+        "languages": ["multilingual"],
+        "description": (
+            "OpenAI Whisper large-v2.  Strong general multilingual model.  "
+            "Use Systran/faster-whisper-large-v2 if you have that cached instead."
+        ),
+    },
+    "openai/whisper-large-v3": {
+        "role": "asr",
+        "architecture": "faster-whisper",
+        "languages": ["multilingual"],
+        "description": "OpenAI Whisper large-v3.  Latest general multilingual model from OpenAI.",
+    },
+    "openai/whisper-tiny": {
+        "role": "asr",
+        "architecture": "faster-whisper",
+        "languages": ["multilingual"],
+        "description": "Whisper tiny — extremely fast but low accuracy.  Useful for testing.",
+    },
+    "Systran/faster-whisper-small": {
+        "role": "asr",
+        "architecture": "faster-whisper",
+        "languages": ["multilingual"],
+        "description": (
+            "Faster-whisper small model in CTranslate2 format.  "
+            "Good balance of speed and accuracy for short clips."
+        ),
+    },
+    # ── alignment models ────────────────────────────────────────────────────
+    "KBLab/wav2vec2-large-voxrex-swedish": {
+        "role": "alignment",
+        "languages": ["sv"],
+        "description": (
+            "Swedish wav2vec2 model used for forced word-level alignment.  "
+            "Selected automatically when language='sv'."
+        ),
+    },
+    "viktor-enzell/wav2vec2-large-voxrex-swedish-4gram": {
+        "role": "alignment",
+        "languages": ["sv"],
+        "description": "Alternative Swedish wav2vec2 alignment model with 4-gram LM.",
+    },
+    # ── diarization / VAD ───────────────────────────────────────────────────
+    "pyannote/speaker-diarization-community-1": {
+        "role": "diarization",
+        "description": (
+            "Pyannote community diarization pipeline.  Pass as 'diarize_model' in "
+            "/transcribe params, or use the default by setting diarize=true."
+        ),
+    },
+    "pyannote/segmentation": {
+        "role": "vad",
+        "description": (
+            "Pyannote segmentation model used as the VAD backbone when "
+            "vad_method='pyannote' (the default)."
+        ),
+    },
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": {
+        "role": "embedding",
+        "description": (
+            "Multilingual sentence embedding model used by the pyannote diarization "
+            "pipeline for speaker representation."
+        ),
+    },
+}
+
+
+def _scan_hf_cache(hf_cache_dir: str) -> list[dict]:
+    """
+    Scan the HuggingFace hub cache directory and return one entry per model found.
+
+    Each entry:
+      model_id      – the HF model ID (e.g. 'KBLab/kb-whisper-large')
+      cache_path    – absolute path to the cache directory for this model
+      role          – from _MODEL_METADATA, or 'unknown' if not recognised
+      description   – from _MODEL_METADATA, or None
+      loaded        – True if this model is currently loaded as the active ASR model
+      metadata      – any additional fields from _MODEL_METADATA
+    """
+    results = []
+    try:
+        cache = Path(hf_cache_dir)
+        if not cache.is_dir():
+            return results
+        for entry in sorted(cache.iterdir()):
+            name = entry.name
+            # HF hub entries are named  models--{org}--{repo}
+            if not name.startswith("models--"):
+                continue
+            # Reconstruct the model ID: 'models--KBLab--kb-whisper-large' → 'KBLab/kb-whisper-large'
+            parts = name[len("models--"):].split("--", 1)
+            if len(parts) != 2:
+                continue
+            model_id = f"{parts[0]}/{parts[1]}"
+            meta = _MODEL_METADATA.get(model_id, {})
+            record: dict = {
+                "model_id": model_id,
+                "cache_path": str(entry),
+                "role": meta.get("role", "unknown"),
+                "loaded": bool(_config and _config.model == model_id),
+            }
+            if "description" in meta:
+                record["description"] = meta["description"]
+            if "languages" in meta:
+                record["languages"] = meta["languages"]
+            if "architecture" in meta:
+                record["architecture"] = meta["architecture"]
+            results.append(record)
+    except Exception as exc:
+        logger.warning("Could not scan HF cache at %s: %s", hf_cache_dir, exc)
+    return results
+
+
+@app.get("/models")
+async def models():
+    """
+    Report which models are available in the mounted model caches.
+
+    Scans the HuggingFace hub cache (mounted at /models/hf) and classifies
+    each entry by its role in the whisperx pipeline:
+
+      asr          Models that can be passed as 'model' to POST /reload
+                   or manage.py start --model.
+      alignment    Forced-alignment models selected automatically by language.
+      diarization  Speaker diarization pipelines selectable via the
+                   'diarize_model' transcribe param.
+      vad          Voice Activity Detection backbone (internal, not user-selectable).
+      embedding    Speaker embedding model (internal, used by diarization).
+      unknown      Present in the cache but not in the known-model registry.
+
+    Response fields
+    ---------------
+    available       Full list of all cached models with role and metadata.
+    by_role         The same list grouped by role for easy filtering.
+    currently_loaded
+        Which models are actively loaded in memory right now (ASR model
+        plus any lazily-loaded alignment / diarization pipelines).
+    """
+    hf_cache = os.environ.get("HF_HUB_CACHE", "/models/hf")
+    all_models = _scan_hf_cache(hf_cache)
+
+    # Group by role
+    by_role: dict[str, list] = {}
+    for m in all_models:
+        by_role.setdefault(m["role"], []).append(m)
+
+    return {
+        "available": all_models,
+        "by_role": by_role,
+        "currently_loaded": {
+            "asr": _config.model if _config else None,
+            "alignment": list(_align_models.keys()),
+            "diarization": list(_diarize_pipelines.keys()),
+        },
     }
 
 
