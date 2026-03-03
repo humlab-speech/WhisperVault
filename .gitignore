@@ -1,1 +1,12 @@
+# If whisperx is managed as a separate repository (or submodule),
+# ignore its contents in the top-level git repo so we don't accidentally
+# commit the entire external project.  Remove this entry and add a
+# submodule if you prefer tracking it in the main repo.
 whisperx/
+
+demo/
+
+# data and generated outputs - not version controlled
+models/
+input/
+output/
