@@ -88,6 +88,7 @@ def build_podman_command(audio_file: str, extra_args: list[str]) -> list[str]:
         "-v",
         f"{output_dir}:/output",
         "whisperx-local",
+        "standalone",               # tell server.py to use CLI passthrough mode
         f"/input/{os.path.basename(audio_file)}",
     ]
     cmd.extend(extra_args)

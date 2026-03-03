@@ -539,7 +539,7 @@ async def transcribe(
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def _run_server() -> None:
     import uvicorn
 
     sock_dir = Path(SOCKET_PATH).parent
@@ -549,3 +549,35 @@ if __name__ == "__main__":
 
     logger.info("Starting WhisperX server on %s", SOCKET_PATH)
     uvicorn.run(app, uds=SOCKET_PATH, log_level="info")
+
+
+def _run_standalone() -> None:
+    """One-shot mode: delegate directly to the whisperx CLI.
+
+    sys.argv must already have the 'standalone' subcommand removed so that
+    whisperx sees exactly what it expects, e.g.::
+
+        sys.argv == ['server.py', '/input/audio.wav', '--model', 'large-v2', ...]
+    """
+    from whisperx.__main__ import cli
+    sys.exit(cli() or 0)
+
+
+if __name__ == "__main__":
+    # Dispatch based on first argument:
+    #   (no arg) or "server"  →  UDS API server (persistent, model loaded once)
+    #   anything else         →  standalone CLI passthrough (one-shot, --rm)
+    #
+    # The Containerfile sets CMD ["server"] so the default is always server mode.
+    # run_whisper_offline.py prepends "standalone" before the audio path.
+
+    mode = sys.argv[1] if len(sys.argv) > 1 else "server"
+
+    if mode == "server":
+        # strip the literal "server" arg so uvicorn never sees it
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
+        _run_server()
+    else:
+        # standalone: argv[1:] is already the raw whisperx CLI arguments
+        # (audio path first, then flags) – hand them straight to the CLI.
+        _run_standalone()

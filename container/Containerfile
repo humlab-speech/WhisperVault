@@ -25,4 +25,9 @@ RUN chmod +x /app/container/server.py /app/container/manage.py
 # server.py is the container entrypoint (listens on a Unix Domain Socket).
 # manage.py is the HOST-SIDE management script; it is also present inside
 # the image but is not invoked by default.
+#
+# Modes (controlled by the first argument after the image name):
+#   (no arg) / "server"        → persistent UDS API server  [default]
+#   "standalone" <audio> ...   → one-shot CLI passthrough, then exits
 ENTRYPOINT ["/app/container/server.py"]
+CMD ["server"]
