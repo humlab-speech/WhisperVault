@@ -34,6 +34,12 @@ DEFAULT_SOCKET_DIR = os.environ.get("WHISPERX_SOCKET_DIR", "/tmp/whisperx-api")
 DEFAULT_MODELS_DIR = os.path.join(os.getcwd(), "models")
 DEFAULT_HF_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
 
+NGINX_CONTAINER_NAME = "whisperx-nginx"
+NGINX_IMAGE_NAME = "whisperx-nginx"
+# Resolve once at import time so subcommand functions can use it
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_NGINX_DIR = os.path.join(_PROJECT_ROOT, "container", "nginx")
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -121,6 +127,9 @@ def cmd_start(args) -> int:
         "--name", CONTAINER_NAME,
         "--replace",        # remove any container with the same name first
         "--network=none",
+        # Drop all Linux capabilities — whisperx only needs plain Python/PyTorch.
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
         # UDS socket directory (server creates the .sock file inside here)
         "-v", f"{socket_dir}:{os.path.dirname(CONTAINER_SOCKET)}:z",
         # HF hub model cache – read-only (the main model weights live here)
@@ -319,6 +328,125 @@ def _add_model_config_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--hotwords",       default=None)
 
 
+# ── nginx sidecar commands ───────────────────────────────────────────────────
+
+def cmd_build_nginx(_args) -> int:
+    """Build the whisperx-nginx image from container/nginx/."""
+    if not os.path.isdir(_NGINX_DIR):
+        print(f"nginx directory not found: {_NGINX_DIR}", file=sys.stderr)
+        return 1
+    containerfile = os.path.join(_NGINX_DIR, "Containerfile")
+    cmd = [
+        "podman", "build",
+        "-t", NGINX_IMAGE_NAME,
+        "-f", containerfile,
+        _NGINX_DIR,
+    ]
+    print(f"Building nginx image '{NGINX_IMAGE_NAME}' from {_NGINX_DIR} …")
+    result = subprocess.run(cmd)
+    if result.returncode == 0:
+        print(f"Image '{NGINX_IMAGE_NAME}' built successfully.")
+    return result.returncode
+
+
+def cmd_start_nginx(args) -> int:
+    """Start the nginx sidecar container.
+
+    The container:
+      • runs entirely as the unprivileged 'nginx' user (uid 101)
+      • has --cap-drop=ALL  (no Linux capabilities whatsoever)
+      • has a read-only root filesystem (only /tmp is writable via tmpfs)
+      • is NOT started with --network=none so it can accept TCP connections
+      • proxies every request to the whisperx UDS socket
+    """
+    socket_dir = args.socket_dir
+    if not os.path.isdir(socket_dir):
+        print(
+            f"Socket directory '{socket_dir}' does not exist.\n"
+            "Start the whisperx server first:  python container/manage.py start",
+            file=sys.stderr,
+        )
+        return 1
+
+    listen_host = args.listen_host
+    port = args.port
+
+    cmd = [
+        "podman", "run",
+        "--detach",
+        "--name", NGINX_CONTAINER_NAME,
+        "--replace",
+        # ── minimal rights ──────────────────────────────────────────────
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+        "--read-only",
+        # nginx writes pid / temp files to /tmp; everything else is read-only
+        "--tmpfs", "/tmp:mode=1777",
+        # ── socket access ───────────────────────────────────────────────
+        # Mount the socket directory so nginx can connect() to the socket.
+        # Needs to be rw because connect() on a Unix socket requires write
+        # permission on the socket file itself.
+        "-v", f"{socket_dir}:/run/api:z",
+        # ── network ─────────────────────────────────────────────────────
+        # nginx always listens on 8080 inside the container (hard-coded in
+        # nginx.conf).  The --port flag controls only which host port is
+        # exposed; map it to the fixed container port 8080.
+        "-p", f"{listen_host}:{port}:8080",
+        NGINX_IMAGE_NAME,
+    ]
+
+    print(
+        f"Starting nginx sidecar '{NGINX_CONTAINER_NAME}' …\n"
+        f"  Listening on  {listen_host}:{port}\n"
+        f"  Socket dir    {socket_dir}\n"
+        f"  Image         {NGINX_IMAGE_NAME}"
+    )
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("Failed to start nginx container.", file=sys.stderr)
+        return result.returncode
+
+    # Quick sanity-check: wait a couple of seconds then hit the health endpoint
+    # through the TCP port (not the UDS) to confirm the full proxy path works.
+    import socket as _socket
+    for attempt in range(10):
+        time.sleep(1)
+        try:
+            import httpx
+            r = httpx.get(f"http://{listen_host if listen_host != '0.0.0.0' else '127.0.0.1'}:{port}/health", timeout=3)
+            if r.status_code == 200:
+                data = r.json()
+                print(
+                    f"nginx proxy is up. Whisperx backend: "
+                    f"ready={data.get('ready')}, model={data.get('model')}"
+                )
+                print(
+                    f"\nTest from this machine:\n"
+                    f"  curl http://localhost:{port}/health\n"
+                    f"Test from another machine (if listen_host is 0.0.0.0):\n"
+                    f"  curl http://<this-host-ip>:{port}/health"
+                )
+                return 0
+        except Exception:
+            pass
+    print("nginx started but health check did not respond — check logs:", file=sys.stderr)
+    print(f"  podman logs {NGINX_CONTAINER_NAME}", file=sys.stderr)
+    return 1
+
+
+def cmd_stop_nginx(_args) -> int:
+    """Stop and remove the nginx sidecar container."""
+    result = subprocess.run(
+        ["podman", "stop", NGINX_CONTAINER_NAME],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print(f"Stopped '{NGINX_CONTAINER_NAME}'.")
+    else:
+        print(result.stderr.strip() or f"Could not stop '{NGINX_CONTAINER_NAME}'", file=sys.stderr)
+    return result.returncode
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Manage the whisperx-server container",
@@ -391,13 +519,56 @@ def main() -> None:
     p_tx.add_argument("--max-line-width",     dest="max_line_width", type=int, default=None)
     p_tx.add_argument("--max-line-count",     dest="max_line_count", type=int, default=None)
 
+    # ── build-nginx ───────────────────────────────────────────────────────
+    sub.add_parser(
+        "build-nginx",
+        help=f"Build the '{NGINX_IMAGE_NAME}' image from container/nginx/",
+    )
+
+    # ── start-nginx ───────────────────────────────────────────────────────
+    p_nginx = sub.add_parser(
+        "start-nginx",
+        help="Start the nginx reverse-proxy sidecar in front of the whisperx server",
+        description=(
+            "Runs a minimal nginx container that proxies TCP connections to the\n"
+            "whisperx Unix Domain Socket.  The nginx container runs fully as\n"
+            "an unprivileged user with --cap-drop=ALL and a read-only root fs.\n"
+            "\n"
+            "The whisperx server must already be running (manage.py start).\n"
+            "\n"
+            "To expose the API on all network interfaces (so other machines can\n"
+            "reach it), pass --listen-host 0.0.0.0.  Default is 127.0.0.1 which\n"
+            "only accepts connections from localhost."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_nginx.add_argument(
+        "--listen-host", dest="listen_host", default="127.0.0.1",
+        metavar="HOST",
+        help=(
+            "IP address to listen on.  Use 0.0.0.0 to accept connections from "
+            "any interface / other machines on the network.  "
+            "Default: 127.0.0.1 (localhost only)."
+        ),
+    )
+    p_nginx.add_argument(
+        "--port", dest="port", type=int, default=8080,
+        help="TCP port to listen on inside the nginx container (default: 8080)",
+    )
+
+    # ── stop-nginx ────────────────────────────────────────────────────────
+    sub.add_parser("stop-nginx", help=f"Stop the '{NGINX_CONTAINER_NAME}' container")
+
     args = parser.parse_args()
     dispatch = {
-        "start":      cmd_start,
-        "stop":       cmd_stop,
-        "status":     cmd_status,
-        "reload":     cmd_reload,
-        "transcribe": cmd_transcribe,
+        "start":       cmd_start,
+        "stop":        cmd_stop,
+        "status":      cmd_status,
+        "reload":      cmd_reload,
+        "transcribe":  cmd_transcribe,
+        "build-nginx": cmd_build_nginx,
+        "start-nginx": cmd_start_nginx,
+        "stop-nginx":  cmd_stop_nginx,
     }
     sys.exit(dispatch[args.command](args))
 

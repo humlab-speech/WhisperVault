@@ -1,0 +1,41 @@
+# ── WhisperX nginx sidecar ────────────────────────────────────────────────────
+#
+# Minimal Alpine nginx image that proxies HTTP requests to the whisperx
+# Unix Domain Socket.  Designed to run with the smallest possible set of
+# Linux capabilities:
+#
+#   --cap-drop=ALL              (no capabilities whatsoever)
+#   --security-opt=no-new-privileges:true
+#   --read-only                 (root fs is read-only)
+#   --tmpfs /tmp:mode=1777      (nginx writes pid/temp files here)
+#   --network ...               (whatever network policy you want — the
+#                                whisperx container itself stays --network=none)
+#
+# Build:
+#   podman build -t whisperx-nginx -f container/nginx/Containerfile container/nginx/
+#
+# Run (via manage.py):
+#   python container/manage.py start-nginx [--listen-host 0.0.0.0] [--port 8080]
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM nginx:alpine
+
+# Drop the default server block — we replace the entire nginx.conf.
+RUN rm -f /etc/nginx/conf.d/default.conf
+
+# Replace the stock nginx.conf with our non-root, UDS-proxy configuration.
+# The key differences from the default:
+#   • No 'user' directive   — process already runs as 'nginx' (uid 101)
+#   • pid /tmp/nginx.pid    — writable by the nginx user under --read-only
+#   • All temp paths → /tmp — same reason
+#   • Logs to stdout/stderr — consumed by the container runtime
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# nginx:alpine ships with a 'nginx' user (uid=101, gid=101).
+# Switching to it here means:
+#   • The master process never runs as root.
+#   • No capability is needed to bind port 8080 (> 1023).
+#   • No setuid/setgid transitions occur at runtime.
+USER nginx
+
+EXPOSE 8080

@@ -549,6 +549,13 @@ def _run_server() -> None:
     # Remove a stale socket from a previous (crashed) run
     Path(SOCKET_PATH).unlink(missing_ok=True)
 
+    # Allow any process (e.g. an nginx sidecar running as a different uid) to
+    # connect() to the socket.  connect() on a Unix stream socket requires
+    # write permission on the socket file; with the default umask of 0022 the
+    # socket would be created as 0755 (others have no write bit) and the nginx
+    # user would be refused.  Setting umask=0 lets the kernel create it 0777.
+    os.umask(0o000)
+
     logger.info("Starting WhisperX server on %s", SOCKET_PATH)
     uvicorn.run(app, uds=SOCKET_PATH, log_level="info")
 
