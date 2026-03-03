@@ -13,8 +13,8 @@ WORKDIR /app
 # copy entire repository first so pip install can see the package code
 COPY . /app
 
-# install project and API-server dependencies
-RUN pip install --no-cache-dir . fastapi 'uvicorn[standard]' python-multipart
+# install whisperx (lives in the whisperx/ subdirectory) and API-server deps
+RUN pip install --no-cache-dir ./whisperx fastapi 'uvicorn[standard]' python-multipart
 
 # download NLTK data needed for alignment so the container can run offline
 RUN python -c "import nltk; nltk.download('punkt', download_dir='/usr/local/nltk_data'); nltk.download('punkt_tab', download_dir='/usr/local/nltk_data')"
