@@ -32,7 +32,22 @@ IMAGE_NAME = "whisperx-local"
 CONTAINER_SOCKET = "/run/api/whisperx.sock"
 DEFAULT_SOCKET_DIR = os.environ.get("WHISPERX_SOCKET_DIR", "/tmp/whisperx-api")
 DEFAULT_MODELS_DIR = os.path.join(os.getcwd(), "models")
-DEFAULT_HF_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
+_LOCAL_HF_CACHE = os.path.join(os.getcwd(), "models", "hf")
+_SYSTEM_HF_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
+
+
+def _default_hf_cache() -> str:
+    """Prefer ./models/hf (portable self-contained copy) over the system cache.
+
+    Falls back to ~/.cache/huggingface/hub if the local directory is absent
+    or empty so the dev workflow without a local copy keeps working.
+    """
+    if os.path.isdir(_LOCAL_HF_CACHE) and any(os.scandir(_LOCAL_HF_CACHE)):
+        return _LOCAL_HF_CACHE
+    return _SYSTEM_HF_CACHE
+
+
+DEFAULT_HF_CACHE = _default_hf_cache()
 
 NGINX_CONTAINER_NAME = "whisperx-nginx"
 NGINX_IMAGE_NAME = "whisperx-nginx"
@@ -506,7 +521,10 @@ def main() -> None:
         "--hf-cache-dir",
         dest="hf_cache_dir",
         default=DEFAULT_HF_CACHE,
-        help="Host path to the HuggingFace hub cache (default: ~/.cache/huggingface/hub)",
+        help=(
+            "Host path to the HuggingFace hub cache. "
+            "Auto-detected: uses ./models/hf if non-empty, otherwise ~/.cache/huggingface/hub."
+        ),
     )
     p_start.add_argument(
         "--hf-token", dest="hf_token", default=None, help="HuggingFace token (falls back to $HF_TOKEN)"
