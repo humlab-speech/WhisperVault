@@ -1,4 +1,4 @@
-# WhisperX Offline Annotation
+# WhisperVault
 
 Runs [WhisperX](https://github.com/m-bain/whisperX) — automatic speech recognition with word-level
 timestamps, forced alignment, and speaker diarization — inside a fully network-isolated container.
@@ -118,7 +118,7 @@ python container/manage.py stop-nginx    # stop nginx sidecar (if running)
 ## Folder structure
 
 ```
-WhisperXAnnoteOffline/
+WhisperVault/
 │
 ├── container/                  Host-side management and container definitions
 │   ├── Containerfile           Builds the whisperx-local image (python:3.12-slim base)

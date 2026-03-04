@@ -8,7 +8,7 @@ The full user-facing documentation is in README.md.
 
 ## What this project is
 
-**WhisperX Offline Annotation** — runs the [whisperx](https://github.com/m-bain/whisperX)
+**WhisperVault** — runs the [whisperx](https://github.com/m-bain/whisperX)
 speech-recognition / diarization stack inside a fully network-isolated podman container.
 Communication between the host and the container is exclusively over a **Unix Domain Socket (UDS)**.
 The transcription container is always started with `--network=none` and `--cap-drop=ALL`.
