@@ -50,6 +50,24 @@ whisperx/                whisperx Python package    [git-ignored, separate git r
 - `httpx` (not `requests`) for all HTTP over UDS on the host side
 - Async FastAPI handlers; the asyncio lock `_lock` serialises model access
 
+### Pre-commit
+- A host-side venv lives at `whisperx/.venv` — activate it before committing:
+  ```bash
+  source whisperx/.venv/bin/activate
+  ```
+- If `pre-commit` is not yet installed in that venv:
+  ```bash
+  pip install pre-commit
+  pre-commit install
+  ```
+- Always run `pre-commit run --all-files` (or let the git hook run it) before committing.
+
+### Commit messages
+- Keep messages short and to the point — one concise subject line describing *what* changed and *why*.
+- Do **not** include line counts, file counts, or before/after comparisons.
+- Examples of good messages: `fix: correct socket umask before uvicorn start`, `feat: add /models endpoint with HF cache scan`
+- Examples of bad messages: *(adds 42 lines to server.py, removes 3 from manage.py)*
+
 ### Socket
 - Host path: `/tmp/whisperx-api/whisperx.sock` (default, `$WHISPERX_SOCKET`)
 - Container path: `/run/api/whisperx.sock`
