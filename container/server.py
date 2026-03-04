@@ -80,9 +80,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+from whisperx.alignment import align, load_align_model
 from whisperx.asr import load_model as _load_asr_model
 from whisperx.audio import load_audio
-from whisperx.alignment import align, load_align_model
 from whisperx.diarize import DiarizationPipeline, assign_word_speakers
 from whisperx.utils import (
     WriteAudacity,
@@ -116,14 +116,18 @@ ALL_FORMATS = list(WRITER_CLASSES.keys())
 
 # ── model configuration ───────────────────────────────────────────────────────
 
+
 def _env_float(key: str, default: float) -> float:
     return float(os.environ.get(key, default))
+
 
 def _env_int(key: str, default: int) -> int:
     return int(os.environ.get(key, default))
 
+
 def _env_bool(key: str, default: bool) -> bool:
     return os.environ.get(key, str(default)).lower() in ("1", "true", "yes")
+
 
 def _env_opt_str(key: str) -> Optional[str]:
     v = os.environ.get(key, "")
@@ -133,44 +137,44 @@ def _env_opt_str(key: str) -> Optional[str]:
 @dataclass
 class ModelConfig:
     # ── model identity ──────────────────────────────────────────────────────
-    model: str                        = field(default_factory=lambda: os.environ.get("WHISPERX_MODEL", "small"))
-    device: str                       = field(default_factory=lambda: os.environ.get("WHISPERX_DEVICE", "cpu"))
-    device_index: int                 = field(default_factory=lambda: _env_int("WHISPERX_DEVICE_INDEX", 0))
-    compute_type: str                 = field(default_factory=lambda: os.environ.get("WHISPERX_COMPUTE_TYPE", "default"))
-    language: Optional[str]           = field(default_factory=lambda: _env_opt_str("WHISPERX_LANGUAGE"))
-    batch_size: int                   = field(default_factory=lambda: _env_int("WHISPERX_BATCH_SIZE", 8))
-    threads: int                      = field(default_factory=lambda: _env_int("WHISPERX_THREADS", 4))
-    model_dir: Optional[str]          = field(default_factory=lambda: _env_opt_str("WHISPERX_MODEL_DIR"))
-    hf_token: Optional[str]           = field(default_factory=lambda: _env_opt_str("HF_TOKEN"))
+    model: str = field(default_factory=lambda: os.environ.get("WHISPERX_MODEL", "small"))
+    device: str = field(default_factory=lambda: os.environ.get("WHISPERX_DEVICE", "cpu"))
+    device_index: int = field(default_factory=lambda: _env_int("WHISPERX_DEVICE_INDEX", 0))
+    compute_type: str = field(default_factory=lambda: os.environ.get("WHISPERX_COMPUTE_TYPE", "default"))
+    language: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_LANGUAGE"))
+    batch_size: int = field(default_factory=lambda: _env_int("WHISPERX_BATCH_SIZE", 8))
+    threads: int = field(default_factory=lambda: _env_int("WHISPERX_THREADS", 4))
+    model_dir: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_MODEL_DIR"))
+    hf_token: Optional[str] = field(default_factory=lambda: _env_opt_str("HF_TOKEN"))
     # ── ASR / decoding options (baked in at load_model time) ────────────────
-    beam_size: int                    = field(default_factory=lambda: _env_int("WHISPERX_BEAM_SIZE", 5))
-    best_of: int                      = field(default_factory=lambda: _env_int("WHISPERX_BEST_OF", 10))
-    patience: float                   = field(default_factory=lambda: _env_float("WHISPERX_PATIENCE", 1.0))
-    length_penalty: float             = field(default_factory=lambda: _env_float("WHISPERX_LENGTH_PENALTY", 1.0))
-    temperature: float                = field(default_factory=lambda: _env_float("WHISPERX_TEMPERATURE", 0.0))
+    beam_size: int = field(default_factory=lambda: _env_int("WHISPERX_BEAM_SIZE", 5))
+    best_of: int = field(default_factory=lambda: _env_int("WHISPERX_BEST_OF", 10))
+    patience: float = field(default_factory=lambda: _env_float("WHISPERX_PATIENCE", 1.0))
+    length_penalty: float = field(default_factory=lambda: _env_float("WHISPERX_LENGTH_PENALTY", 1.0))
+    temperature: float = field(default_factory=lambda: _env_float("WHISPERX_TEMPERATURE", 0.0))
     temperature_increment_on_fallback: Optional[float] = field(
         default_factory=lambda: _env_float("WHISPERX_TEMP_INCREMENT", 0.2)
     )
     compression_ratio_threshold: float = field(default_factory=lambda: _env_float("WHISPERX_COMPRESSION_THR", 2.4))
-    logprob_threshold: float           = field(default_factory=lambda: _env_float("WHISPERX_LOGPROB_THR", -1.0))
-    no_speech_threshold: float         = field(default_factory=lambda: _env_float("WHISPERX_NO_SPEECH_THR", 0.6))
-    suppress_tokens: str               = field(default_factory=lambda: os.environ.get("WHISPERX_SUPPRESS_TOKENS", "-1"))
-    suppress_numerals: bool            = field(default_factory=lambda: _env_bool("WHISPERX_SUPPRESS_NUMERALS", False))
-    condition_on_previous_text: bool   = field(default_factory=lambda: _env_bool("WHISPERX_CONDITION_ON_PREV", False))
-    initial_prompt: Optional[str]      = field(default_factory=lambda: _env_opt_str("WHISPERX_INITIAL_PROMPT"))
-    hotwords: Optional[str]            = field(default_factory=lambda: _env_opt_str("WHISPERX_HOTWORDS"))
+    logprob_threshold: float = field(default_factory=lambda: _env_float("WHISPERX_LOGPROB_THR", -1.0))
+    no_speech_threshold: float = field(default_factory=lambda: _env_float("WHISPERX_NO_SPEECH_THR", 0.6))
+    suppress_tokens: str = field(default_factory=lambda: os.environ.get("WHISPERX_SUPPRESS_TOKENS", "-1"))
+    suppress_numerals: bool = field(default_factory=lambda: _env_bool("WHISPERX_SUPPRESS_NUMERALS", False))
+    condition_on_previous_text: bool = field(default_factory=lambda: _env_bool("WHISPERX_CONDITION_ON_PREV", False))
+    initial_prompt: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_INITIAL_PROMPT"))
+    hotwords: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_HOTWORDS"))
     # ── VAD options (baked in at load_model time) ───────────────────────────
-    vad_method: str    = field(default_factory=lambda: os.environ.get("WHISPERX_VAD_METHOD", "pyannote"))
-    vad_onset: float   = field(default_factory=lambda: _env_float("WHISPERX_VAD_ONSET", 0.500))
-    vad_offset: float  = field(default_factory=lambda: _env_float("WHISPERX_VAD_OFFSET", 0.363))
-    chunk_size: int    = field(default_factory=lambda: _env_int("WHISPERX_CHUNK_SIZE", 30))
+    vad_method: str = field(default_factory=lambda: os.environ.get("WHISPERX_VAD_METHOD", "pyannote"))
+    vad_onset: float = field(default_factory=lambda: _env_float("WHISPERX_VAD_ONSET", 0.500))
+    vad_offset: float = field(default_factory=lambda: _env_float("WHISPERX_VAD_OFFSET", 0.363))
+    chunk_size: int = field(default_factory=lambda: _env_int("WHISPERX_CHUNK_SIZE", 30))
 
 
 # ── server state ──────────────────────────────────────────────────────────────
 
 _config: Optional[ModelConfig] = None
 _asr_model: Any = None
-_align_models: dict[str, tuple] = {}   # language → (model, metadata)
+_align_models: dict[str, tuple] = {}  # language → (model, metadata)
 _diarize_pipelines: dict[str, Any] = {}  # model_name → DiarizationPipeline
 _ready: bool = False
 _reloading: bool = False
@@ -178,6 +182,7 @@ _lock = asyncio.Lock()
 
 
 # ── model lifecycle ───────────────────────────────────────────────────────────
+
 
 def _build_asr_options(cfg: ModelConfig) -> dict:
     temp = cfg.temperature
@@ -229,8 +234,8 @@ def _load_models(cfg: ModelConfig) -> None:
     logger.info("ASR model ready in %.1fs", time.time() - t0)
     _config = cfg
     _asr_model = asr
-    _align_models = {}          # invalidate cached align models on reload
-    _diarize_pipelines = {}     # invalidate cached diarize pipelines on reload
+    _align_models = {}  # invalidate cached align models on reload
+    _diarize_pipelines = {}  # invalidate cached diarize pipelines on reload
     _ready = True
 
 
@@ -254,7 +259,8 @@ def _get_align_model(language: str, cfg: ModelConfig):
     if language not in _align_models:
         logger.info("Loading alignment model for '%s' …", language)
         m, meta = load_align_model(
-            language, cfg.device,
+            language,
+            cfg.device,
             model_dir=cfg.model_dir,
             model_cache_only=True,
         )
@@ -275,6 +281,7 @@ def _get_diarize_pipeline(model_name: str, cfg: ModelConfig):
 
 
 # ── output formatting ─────────────────────────────────────────────────────────
+
 
 def _to_python(obj):
     """Recursively convert numpy scalars/arrays to plain Python types."""
@@ -307,6 +314,7 @@ def _format_outputs(result: dict, formats: list[str], writer_args: dict) -> dict
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -381,8 +389,7 @@ _MODEL_METADATA: dict[str, dict] = {
         "architecture": "faster-whisper",
         "languages": ["multilingual"],
         "description": (
-            "Faster-whisper small model in CTranslate2 format.  "
-            "Good balance of speed and accuracy for short clips."
+            "Faster-whisper small model in CTranslate2 format.  " "Good balance of speed and accuracy for short clips."
         ),
     },
     # ── alignment models ────────────────────────────────────────────────────
@@ -410,8 +417,7 @@ _MODEL_METADATA: dict[str, dict] = {
     "pyannote/segmentation": {
         "role": "vad",
         "description": (
-            "Pyannote segmentation model used as the VAD backbone when "
-            "vad_method='pyannote' (the default)."
+            "Pyannote segmentation model used as the VAD backbone when " "vad_method='pyannote' (the default)."
         ),
     },
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": {
@@ -447,7 +453,7 @@ def _scan_hf_cache(hf_cache_dir: str) -> list[dict]:
             if not name.startswith("models--"):
                 continue
             # Reconstruct the model ID: 'models--KBLab--kb-whisper-large' → 'KBLab/kb-whisper-large'
-            parts = name[len("models--"):].split("--", 1)
+            parts = name[len("models--") :].split("--", 1)
             if len(parts) != 2:
                 continue
             model_id = f"{parts[0]}/{parts[1]}"
@@ -543,32 +549,31 @@ _TRANSCRIBE_PARAMS: dict = {
         "type": "int",
         "default": 8,
         "description": "Number of audio chunks processed in parallel during ASR inference. "
-                       "Lower values reduce peak memory use; higher values may improve speed on GPU.",
+        "Lower values reduce peak memory use; higher values may improve speed on GPU.",
     },
     "chunk_size": {
         "type": "int",
         "default": 30,
         "description": "VAD chunk length in seconds. Longer chunks give the model more context "
-                       "but increase latency and memory use.",
+        "but increase latency and memory use.",
     },
     "no_align": {
         "type": "bool",
         "default": False,
         "description": "Skip forced alignment. Segments will have sentence-level start/end "
-                       "timestamps only; the 'words' array will be absent.",
+        "timestamps only; the 'words' array will be absent.",
     },
     "align_model": {
         "type": "string | null",
         "default": None,
         "description": "HuggingFace model ID to use for forced alignment. "
-                       "Defaults to the best available model for the detected language.",
+        "Defaults to the best available model for the detected language.",
     },
     "interpolate_method": {
         "type": "string",
         "default": "nearest",
         "enum": ["nearest", "linear", "ignore"],
-        "description": "How to assign timestamps to words that fall in silent gaps between "
-                       "aligned segments.",
+        "description": "How to assign timestamps to words that fall in silent gaps between " "aligned segments.",
     },
     "return_char_alignments": {
         "type": "bool",
@@ -579,32 +584,29 @@ _TRANSCRIBE_PARAMS: dict = {
         "type": "bool",
         "default": False,
         "description": "Run speaker diarization after transcription. Each segment will gain a "
-                       "'speaker' field (e.g. 'SPEAKER_00'). Requires the pyannote diarization "
-                       "model to be available in the model cache.",
+        "'speaker' field (e.g. 'SPEAKER_00'). Requires the pyannote diarization "
+        "model to be available in the model cache.",
     },
     "min_speakers": {
         "type": "int | null",
         "default": None,
-        "description": "Minimum number of speakers to assume during diarization. "
-                       "Only used when diarize=true.",
+        "description": "Minimum number of speakers to assume during diarization. " "Only used when diarize=true.",
     },
     "max_speakers": {
         "type": "int | null",
         "default": None,
-        "description": "Maximum number of speakers to assume during diarization. "
-                       "Only used when diarize=true.",
+        "description": "Maximum number of speakers to assume during diarization. " "Only used when diarize=true.",
     },
     "diarize_model": {
         "type": "string",
         "default": "pyannote/speaker-diarization-community-1",
-        "description": "HuggingFace model ID for the diarization pipeline. "
-                       "Only used when diarize=true.",
+        "description": "HuggingFace model ID for the diarization pipeline. " "Only used when diarize=true.",
     },
     "speaker_embeddings": {
         "type": "bool",
         "default": False,
         "description": "Return per-speaker embedding vectors alongside segment annotations. "
-                       "Only used when diarize=true.",
+        "Only used when diarize=true.",
     },
     "output_format": {
         "type": "string | list[string]",
@@ -623,7 +625,7 @@ _TRANSCRIBE_PARAMS: dict = {
         "type": "bool",
         "default": False,
         "description": "Underline each word at the moment it is spoken in SRT/VTT output. "
-                       "Requires word-level alignment (no_align must be false).",
+        "Requires word-level alignment (no_align must be false).",
     },
     "max_line_width": {
         "type": "int | null",
@@ -659,83 +661,115 @@ def _model_config_schema() -> dict:
     # Fields absent from this map will still appear in the output but without a
     # description or env_var hint.
     _meta: dict[str, dict] = {
-        "model":           {"env": "WHISPERX_MODEL",
-                            "description": "Whisper model name or HuggingFace repo ID "
-                                           "(e.g. 'small', 'large-v2', 'KBLab/kb-whisper-large')."},
-        "device":          {"env": "WHISPERX_DEVICE",      "enum": ["cpu", "cuda"],
-                            "description": "Compute device. Use 'cpu' unless a CUDA GPU is available."},
-        "device_index":    {"env": "WHISPERX_DEVICE_INDEX",
-                            "description": "GPU device index when device='cuda'."},
-        "compute_type":    {"env": "WHISPERX_COMPUTE_TYPE",
-                            "enum": ["default", "float16", "float32", "int8"],
-                            "description": "Quantisation precision. 'float32' is safest on CPU; "
-                                           "'float16' or 'int8' for faster GPU inference."},
-        "language":        {"env": "WHISPERX_LANGUAGE",
-                            "description": "ISO-639-1 language code baked in at model-load time. "
-                                           "Can also be overridden per-request without a reload."},
-        "batch_size":      {"env": "WHISPERX_BATCH_SIZE",
-                            "description": "Default batch size used when not overridden per-request."},
-        "threads":         {"env": "WHISPERX_THREADS",
-                            "description": "Number of CPU threads allocated to PyTorch."},
-        "model_dir":       {"env": "WHISPERX_MODEL_DIR",
-                            "description": "Custom directory for model downloads. "
-                                           "Null = use the default HF/torch cache."},
-        "hf_token":        {"env": "HF_TOKEN",
-                            "description": "HuggingFace access token for gated models "
-                                           "(e.g. pyannote diarization). Not logged."},
-        "beam_size":       {"env": "WHISPERX_BEAM_SIZE",
-                            "description": "Beam search width. Higher = better accuracy, slower."},
-        "best_of":         {"env": "WHISPERX_BEST_OF",
-                            "description": "Number of candidates sampled when temperature > 0."},
-        "patience":        {"env": "WHISPERX_PATIENCE",
-                            "description": "Beam search patience factor."},
-        "length_penalty":  {"env": "WHISPERX_LENGTH_PENALTY",
-                            "description": "Exponential length penalty applied to beam scores."},
-        "temperature":     {"env": "WHISPERX_TEMPERATURE",
-                            "description": "Sampling temperature. 0 = greedy / beam search."},
+        "model": {
+            "env": "WHISPERX_MODEL",
+            "description": "Whisper model name or HuggingFace repo ID "
+            "(e.g. 'small', 'large-v2', 'KBLab/kb-whisper-large').",
+        },
+        "device": {
+            "env": "WHISPERX_DEVICE",
+            "enum": ["cpu", "cuda"],
+            "description": "Compute device. Use 'cpu' unless a CUDA GPU is available.",
+        },
+        "device_index": {"env": "WHISPERX_DEVICE_INDEX", "description": "GPU device index when device='cuda'."},
+        "compute_type": {
+            "env": "WHISPERX_COMPUTE_TYPE",
+            "enum": ["default", "float16", "float32", "int8"],
+            "description": "Quantisation precision. 'float32' is safest on CPU; "
+            "'float16' or 'int8' for faster GPU inference.",
+        },
+        "language": {
+            "env": "WHISPERX_LANGUAGE",
+            "description": "ISO-639-1 language code baked in at model-load time. "
+            "Can also be overridden per-request without a reload.",
+        },
+        "batch_size": {
+            "env": "WHISPERX_BATCH_SIZE",
+            "description": "Default batch size used when not overridden per-request.",
+        },
+        "threads": {"env": "WHISPERX_THREADS", "description": "Number of CPU threads allocated to PyTorch."},
+        "model_dir": {
+            "env": "WHISPERX_MODEL_DIR",
+            "description": "Custom directory for model downloads. " "Null = use the default HF/torch cache.",
+        },
+        "hf_token": {
+            "env": "HF_TOKEN",
+            "description": "HuggingFace access token for gated models " "(e.g. pyannote diarization). Not logged.",
+        },
+        "beam_size": {
+            "env": "WHISPERX_BEAM_SIZE",
+            "description": "Beam search width. Higher = better accuracy, slower.",
+        },
+        "best_of": {"env": "WHISPERX_BEST_OF", "description": "Number of candidates sampled when temperature > 0."},
+        "patience": {"env": "WHISPERX_PATIENCE", "description": "Beam search patience factor."},
+        "length_penalty": {
+            "env": "WHISPERX_LENGTH_PENALTY",
+            "description": "Exponential length penalty applied to beam scores.",
+        },
+        "temperature": {
+            "env": "WHISPERX_TEMPERATURE",
+            "description": "Sampling temperature. 0 = greedy / beam search.",
+        },
         "temperature_increment_on_fallback": {
-                            "env": "WHISPERX_TEMP_INCREMENT",
-                            "description": "Temperature step used when the model falls back due to "
-                                           "high compression ratio or low log-probability. "
-                                           "Null disables fallback."},
+            "env": "WHISPERX_TEMP_INCREMENT",
+            "description": "Temperature step used when the model falls back due to "
+            "high compression ratio or low log-probability. "
+            "Null disables fallback.",
+        },
         "compression_ratio_threshold": {
-                            "env": "WHISPERX_COMPRESSION_THR",
-                            "description": "If the gzip compression ratio of the output exceeds "
-                                           "this value the segment is considered failed and "
-                                           "temperature fallback is triggered."},
-        "logprob_threshold":{"env": "WHISPERX_LOGPROB_THR",
-                            "description": "Average log-probability threshold below which "
-                                           "temperature fallback is triggered."},
+            "env": "WHISPERX_COMPRESSION_THR",
+            "description": "If the gzip compression ratio of the output exceeds "
+            "this value the segment is considered failed and "
+            "temperature fallback is triggered.",
+        },
+        "logprob_threshold": {
+            "env": "WHISPERX_LOGPROB_THR",
+            "description": "Average log-probability threshold below which " "temperature fallback is triggered.",
+        },
         "no_speech_threshold": {
-                            "env": "WHISPERX_NO_SPEECH_THR",
-                            "description": "If the no-speech probability exceeds this value the "
-                                           "segment is treated as silence."},
-        "suppress_tokens": {"env": "WHISPERX_SUPPRESS_TOKENS",
-                            "description": "Comma-separated list of token IDs to suppress. "
-                                           "'-1' suppresses the default set of special tokens."},
+            "env": "WHISPERX_NO_SPEECH_THR",
+            "description": "If the no-speech probability exceeds this value the " "segment is treated as silence.",
+        },
+        "suppress_tokens": {
+            "env": "WHISPERX_SUPPRESS_TOKENS",
+            "description": "Comma-separated list of token IDs to suppress. "
+            "'-1' suppresses the default set of special tokens.",
+        },
         "suppress_numerals": {
-                            "env": "WHISPERX_SUPPRESS_NUMERALS",
-                            "description": "Replace numeric digits with their spoken-word forms."},
+            "env": "WHISPERX_SUPPRESS_NUMERALS",
+            "description": "Replace numeric digits with their spoken-word forms.",
+        },
         "condition_on_previous_text": {
-                            "env": "WHISPERX_CONDITION_ON_PREV",
-                            "description": "Feed the previous segment's text as a prompt for "
-                                           "the next segment. Can improve continuity but risks "
-                                           "hallucination loops on long files."},
-        "initial_prompt":  {"env": "WHISPERX_INITIAL_PROMPT",
-                            "description": "Text prepended as context before the first segment. "
-                                           "Useful for domain-specific vocabulary."},
-        "hotwords":        {"env": "WHISPERX_HOTWORDS",
-                            "description": "Space-separated hotwords boosted during decoding."},
-        "vad_method":      {"env": "WHISPERX_VAD_METHOD", "enum": ["pyannote", "silero"],
-                            "description": "Voice Activity Detection backend. 'pyannote' gives "
-                                           "better accuracy; 'silero' is lighter and faster."},
-        "vad_onset":       {"env": "WHISPERX_VAD_ONSET",
-                            "description": "VAD probability threshold to start a speech segment."},
-        "vad_offset":      {"env": "WHISPERX_VAD_OFFSET",
-                            "description": "VAD probability threshold to end a speech segment."},
-        "chunk_size":      {"env": "WHISPERX_CHUNK_SIZE",
-                            "description": "Default VAD chunk length in seconds. "
-                                           "Can also be overridden per-request without a reload."},
+            "env": "WHISPERX_CONDITION_ON_PREV",
+            "description": "Feed the previous segment's text as a prompt for "
+            "the next segment. Can improve continuity but risks "
+            "hallucination loops on long files.",
+        },
+        "initial_prompt": {
+            "env": "WHISPERX_INITIAL_PROMPT",
+            "description": "Text prepended as context before the first segment. "
+            "Useful for domain-specific vocabulary.",
+        },
+        "hotwords": {"env": "WHISPERX_HOTWORDS", "description": "Space-separated hotwords boosted during decoding."},
+        "vad_method": {
+            "env": "WHISPERX_VAD_METHOD",
+            "enum": ["pyannote", "silero"],
+            "description": "Voice Activity Detection backend. 'pyannote' gives "
+            "better accuracy; 'silero' is lighter and faster.",
+        },
+        "vad_onset": {
+            "env": "WHISPERX_VAD_ONSET",
+            "description": "VAD probability threshold to start a speech segment.",
+        },
+        "vad_offset": {
+            "env": "WHISPERX_VAD_OFFSET",
+            "description": "VAD probability threshold to end a speech segment.",
+        },
+        "chunk_size": {
+            "env": "WHISPERX_CHUNK_SIZE",
+            "description": "Default VAD chunk length in seconds. "
+            "Can also be overridden per-request without a reload.",
+        },
     }
 
     schema: dict = {}
@@ -923,9 +957,9 @@ async def transcribe(
 
             batch_size = p.get("batch_size", cfg.batch_size)
             chunk_size = p.get("chunk_size", cfg.chunk_size)
-            language   = p.get("language", cfg.language) or None
-            task       = p.get("task", "transcribe")
-            verbose    = bool(p.get("verbose", False))
+            language = p.get("language", cfg.language) or None
+            task = p.get("task", "transcribe")
+            verbose = bool(p.get("verbose", False))
             print_prog = bool(p.get("print_progress", False))
 
             # ── VAD + ASR ────────────────────────────────────────────────────
@@ -997,21 +1031,25 @@ async def transcribe(
                 formats = [raw_fmt]
 
             writer_args = {
-                "highlight_words":  bool(p.get("highlight_words", False)),
-                "max_line_count":   p.get("max_line_count"),
-                "max_line_width":   p.get("max_line_width"),
+                "highlight_words": bool(p.get("highlight_words", False)),
+                "max_line_count": p.get("max_line_count"),
+                "max_line_width": p.get("max_line_width"),
             }
             outputs = _format_outputs(result, formats, writer_args)
 
             duration = round(time.time() - t_start, 2)
-            logger.info("Done in %.1fs, language=%s, %d segments", duration, align_language, len(result.get("segments", [])))
+            logger.info(
+                "Done in %.1fs, language=%s, %d segments", duration, align_language, len(result.get("segments", []))
+            )
 
-            return JSONResponse({
-                "language": align_language,
-                "duration_seconds": duration,
-                "segments": result.get("segments", []),
-                "outputs": outputs,
-            })
+            return JSONResponse(
+                {
+                    "language": align_language,
+                    "duration_seconds": duration,
+                    "segments": result.get("segments", []),
+                    "outputs": outputs,
+                }
+            )
 
         except HTTPException:
             raise
@@ -1023,6 +1061,7 @@ async def transcribe(
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
+
 
 def _run_server() -> None:
     import uvicorn
@@ -1052,6 +1091,7 @@ def _run_standalone() -> None:
         sys.argv == ['server.py', '/input/audio.wav', '--model', 'large-v2', ...]
     """
     from whisperx.__main__ import cli
+
     sys.exit(cli() or 0)
 
 

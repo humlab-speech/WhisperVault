@@ -2,7 +2,9 @@
 # run with system python (avoids pyenv shims); if a venv python is
 # available we immediately re-exec with it so everything runs in the
 # project's virtualenv.
-import os, sys
+import os
+import sys
+
 venv = os.path.join(os.getcwd(), ".venv", "bin", "python3")
 if os.path.isfile(venv) and os.path.abspath(sys.executable) != os.path.abspath(venv):
     os.execv(venv, [venv] + sys.argv)
@@ -33,11 +35,11 @@ alignment models you intend to use.  Those directories will be mounted
 read‑only into the container.  See ``container/README.md`` for details.
 """
 
-import argparse
-import os
-import shlex
-import subprocess
-import sys
+import argparse  # noqa: E402
+import os  # noqa: E402
+import shlex  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
 
 
 def build_podman_command(audio_file: str, extra_args: list[str]) -> list[str]:
@@ -88,7 +90,7 @@ def build_podman_command(audio_file: str, extra_args: list[str]) -> list[str]:
         "-v",
         f"{output_dir}:/output",
         "whisperx-local",
-        "standalone",               # tell server.py to use CLI passthrough mode
+        "standalone",  # tell server.py to use CLI passthrough mode
         f"/input/{os.path.basename(audio_file)}",
     ]
     cmd.extend(extra_args)

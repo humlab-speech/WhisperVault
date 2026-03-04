@@ -46,9 +46,7 @@ class WhisperXClient:
         try:
             import httpx
         except ImportError as exc:
-            raise ImportError(
-                "httpx is required:  pip install 'httpx>=0.23'"
-            ) from exc
+            raise ImportError("httpx is required:  pip install 'httpx>=0.23'") from exc
         self._httpx = httpx
         self._socket_path = socket_path
         self._timeout = timeout

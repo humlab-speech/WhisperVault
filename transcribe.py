@@ -53,7 +53,7 @@ def make_client(socket_path: str) -> httpx.Client:
     return httpx.Client(
         transport=httpx.HTTPTransport(uds=socket_path),
         base_url="http://localhost",
-        timeout=None,   # transcription can take many minutes on CPU
+        timeout=None,  # transcription can take many minutes on CPU
     )
 
 
@@ -176,58 +176,77 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument(
-        "--socket", default=DEFAULT_SOCKET, metavar="PATH",
+        "--socket",
+        default=DEFAULT_SOCKET,
+        metavar="PATH",
         help="Unix socket path (default: $WHISPERX_SOCKET or /tmp/whisperx-api/whisperx.sock)",
     )
 
     # ── info subcommands (no audio file needed) ──────────────────────────────
     info = parser.add_mutually_exclusive_group()
     info.add_argument(
-        "--status", action="store_true",
+        "--status",
+        action="store_true",
         help="Print server health and currently loaded model, then exit",
     )
     info.add_argument(
-        "--models", action="store_true",
+        "--models",
+        action="store_true",
         help="List all models available in the server's cache, then exit",
     )
 
     # ── audio ────────────────────────────────────────────────────────────────
     parser.add_argument(
-        "audio", nargs="?",
+        "audio",
+        nargs="?",
         help="Path to the audio file to transcribe",
     )
 
     # ── transcription options ────────────────────────────────────────────────
-    parser.add_argument("--language",   "-l", default=None, metavar="CODE",
-                        help="ISO-639-1 language code (e.g. sv, en).  Omit for auto-detect.")
-    parser.add_argument("--task",       default=None, choices=["transcribe", "translate"],
-                        help="'translate' forces English output")
-    parser.add_argument("--diarize",    "-d", action="store_true",
-                        help="Enable speaker diarization")
+    parser.add_argument(
+        "--language",
+        "-l",
+        default=None,
+        metavar="CODE",
+        help="ISO-639-1 language code (e.g. sv, en).  Omit for auto-detect.",
+    )
+    parser.add_argument(
+        "--task", default=None, choices=["transcribe", "translate"], help="'translate' forces English output"
+    )
+    parser.add_argument("--diarize", "-d", action="store_true", help="Enable speaker diarization")
     parser.add_argument("--min-speakers", dest="min_speakers", type=int, default=None)
     parser.add_argument("--max-speakers", dest="max_speakers", type=int, default=None)
-    parser.add_argument("--no-align",   dest="no_align", action="store_true",
-                        help="Skip forced word-level alignment (faster)")
+    parser.add_argument(
+        "--no-align", dest="no_align", action="store_true", help="Skip forced word-level alignment (faster)"
+    )
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=None)
 
     # ── output options ───────────────────────────────────────────────────────
     parser.add_argument(
-        "--format", "-f", nargs="+", default=None,
+        "--format",
+        "-f",
+        nargs="+",
+        default=None,
         metavar="FMT",
         choices=["txt", "srt", "vtt", "tsv", "json", "aud"],
         help="Output format(s): txt srt vtt tsv json aud  (default: txt)",
     )
     parser.add_argument(
-        "--output-dir", "-o", dest="output_dir", default=None, metavar="DIR",
+        "--output-dir",
+        "-o",
+        dest="output_dir",
+        default=None,
+        metavar="DIR",
         help="Directory to write output files (default: same directory as audio file)",
     )
     parser.add_argument(
-        "--print", action="store_true",
+        "--print",
+        action="store_true",
         help="Print output to stdout instead of writing files",
     )
-    parser.add_argument("--highlight-words",  dest="highlight_words",  action="store_true")
-    parser.add_argument("--max-line-width",   dest="max_line_width",   type=int, default=None)
-    parser.add_argument("--max-line-count",   dest="max_line_count",   type=int, default=None)
+    parser.add_argument("--highlight-words", dest="highlight_words", action="store_true")
+    parser.add_argument("--max-line-width", dest="max_line_width", type=int, default=None)
+    parser.add_argument("--max-line-count", dest="max_line_count", type=int, default=None)
 
     args = parser.parse_args()
 
