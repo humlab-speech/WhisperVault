@@ -15,6 +15,106 @@ the transcription container stays air-gapped while the nginx container handles a
 
 ---
 
+## Quickstart
+
+### 1 — Build the images
+
+```bash
+# From the repository root:
+podman build -t whisperx-local -f container/Containerfile .
+podman build -t whisperx-nginx -f container/nginx/Containerfile container/nginx/
+```
+
+### 2 — Start the transcription server
+
+```bash
+python container/manage.py start \
+    --model KBLab/kb-whisper-large \
+    --device cpu \
+    --compute-type float32 \
+    --language sv
+```
+
+The command polls until the model is loaded (~15–60 s on first run) and prints a ready confirmation.
+The container runs with `--network=none` and `--cap-drop=ALL` — no internet access at any point.
+
+### 3 — (Optional) Start the nginx sidecar
+
+Only needed if you want to reach the API over TCP from another machine or service.
+Skip this if you are running everything on the same host.
+
+```bash
+# Localhost only (safe default):
+python container/manage.py start-nginx
+
+# Exposed to the network on port 8088:
+python container/manage.py start-nginx --listen-host 0.0.0.0 --port 8088
+```
+
+### 4 — Transcribe
+
+**Using `transcribe.py` (recommended for local use):**
+
+```bash
+# Install the only dependency if you don't have it:
+pip install httpx
+
+# Transcribe with speaker diarization, write SRT to ./output/:
+python transcribe.py audio.wav --language sv --diarize --format srt --output-dir output/
+
+# Multiple formats at once:
+python transcribe.py audio.wav --language sv --diarize --format srt txt json --output-dir output/
+
+# Print plain text to stdout (useful in scripts):
+python transcribe.py audio.wav --language sv --format txt --print
+
+# Check server status and available models:
+python transcribe.py --status
+python transcribe.py --models
+```
+
+**Using `curl` directly over the socket:**
+
+```bash
+curl --unix-socket /tmp/whisperx-api/whisperx.sock \
+    -X POST http://localhost/transcribe \
+    -F "audio=@audio.wav" \
+    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}'
+```
+
+**Using `curl` through the nginx sidecar (from any machine on the network):**
+
+```bash
+curl http://<host-ip>:8088/transcribe \
+    -F "audio=@audio.wav" \
+    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}'
+```
+
+### 5 — Switch models without restarting
+
+```bash
+# See what's available:
+python transcribe.py --models
+
+# Switch the loaded ASR model on the fly:
+python container/manage.py reload --model Systran/faster-whisper-small
+
+# Or directly via curl:
+curl --unix-socket /tmp/whisperx-api/whisperx.sock \
+    -X POST http://localhost/reload \
+    -H 'Content-Type: application/json' \
+    -d '{"model": "KBLab/kb-whisper-large"}'
+```
+
+### 6 — Stop
+
+```bash
+python container/manage.py stop          # stop transcription container
+python container/manage.py stop-nginx    # stop nginx sidecar (if running)
+```
+
+---
+
 ## Folder structure
 
 ```
