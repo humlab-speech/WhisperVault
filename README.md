@@ -15,6 +15,37 @@ the transcription container stays air-gapped while the nginx container handles a
 
 ---
 
+## Prerequisites
+
+These commands are executed on the *host* machine (not inside the container).  You
+only need a very small Python environment for the management scripts; all heavy
+work runs inside the podman container.
+
+- **Python** 3.12 or later with a simple virtualenv.  We keep a host-side venv
+  at `./.venv` in the repository to isolate dependencies.
+- [`podman`](https://podman.io/) installed and configured.  (Docker works too if
+  you prefer; just substitute `docker` for the `podman` commands below.)
+- **httpx** — used by both `container/manage.py` and `transcribe.py` for talking
+  to the Unix socket.  Install it inside your venv:
+
+```bash
+python -m venv .venv          # one-time setup
+source .venv/bin/activate     # every shell before using the repo
+pip install httpx pre-commit  # httpx is the only runtime dependency; pre-commit is optional
+```
+
+With the venv active you can run the host utilities like this:
+
+```bash
+python container/manage.py start --help     # note the path to the script
+python transcribe.py --help
+```
+
+`manage.py` lives in `container/` simply to keep the root directory cleaner;
+calling it via `python container/manage.py` is intentional and stable.
+
+Once the environment is set up you can follow the quickstart below.
+
 ## Quickstart
 
 ### 1 — Build the images
