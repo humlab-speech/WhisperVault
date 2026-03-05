@@ -29,11 +29,22 @@ podman build -t whisperx-nginx -f container/nginx/Containerfile container/nginx/
 
 ```bash
 python container/manage.py start \
-    --model KBLab/kb-whisper-large \
+    --model /models/extra/kb-whisper-large-ct2 \
+    --align-model /models/extra/wav2vec2-large-voxrex-swedish \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
     --device cpu \
     --compute-type float32 \
     --language sv
 ```
+
+The start script watches the podman container state; if the container exits
+before the socket becomes ready you’ll see an immediate error and a pointer
+to `podman logs` instead of waiting forever.  This avoids silent hangs when a
+crash (e.g. GPU driver issue) occurs.  If you request CUDA but it is not
+available (drivers missing, `--gpus` not passed, or CTranslate2 falling back
+silently) the server will exit with a clear error — it will never pretend to be
+on CUDA while actually running on CPU.  You can rerun the same command –
+`--replace` will stop any old instance for you.
 
 The command polls until the model is loaded (~15–60 s on first run) and prints a ready confirmation.
 The container runs with `--network=none` and `--cap-drop=ALL` — no internet access at any point.
@@ -75,20 +86,55 @@ python transcribe.py --models
 
 **Using `curl` directly over the socket:**
 
+curl returns the raw JSON API response (including the formatted text inside `outputs`).
+Use `transcribe.py` if you want files written to disk automatically.
+
 ```bash
-curl --unix-socket /tmp/whisperx-api/whisperx.sock \
+# Returns JSON to stdout — pipe through jq to extract a specific format:
+curl -s --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/transcribe \
     -F "audio=@audio.wav" \
-    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}'
+    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}' \
+  | jq -r '.outputs.srt' > output/audio.srt
 ```
 
 **Using `curl` through the nginx sidecar (from any machine on the network):**
 
 ```bash
-curl http://<host-ip>:8088/transcribe \
+curl -s http://<host-ip>:8088/transcribe \
     -F "audio=@audio.wav" \
-    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}'
+    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}' \
+  | jq -r '.outputs.srt' > audio.srt
 ```
+
+### Examples
+
+The commands shown above are the primary curl-based translation of what
+`transcribe.py` does automatically.  A minimal shell example that writes
+the SRT output to a file is:
+
+```bash
+curl -s --unix-socket /tmp/whisperx-api/whisperx.sock \
+    -X POST http://localhost/transcribe \
+    -F "audio=@audio.wav" \
+    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}' \
+  | jq -r '.outputs.srt' > audio.srt
+```
+
+and the same request through the HTTP sidecar looks like this:
+
+```bash
+curl -s http://localhost:8088/transcribe \
+    -F "audio=@audio.wav" \
+    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}' \
+  | jq -r '.outputs.srt' > audio.srt
+```
+
+If you prefer Python, the `transcribe.py` client already wraps this logic
+and takes care of sending files and writing multiple formats.  In your own
+script you can replicate the behaviour using `httpx` as shown in the
+`container/client.py` module or simply import and call `container.client.
+transcribe()` around whichever network code you need.
 
 ### 5 — Switch models without restarting
 
@@ -103,7 +149,7 @@ python container/manage.py reload --model Systran/faster-whisper-small
 curl --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/reload \
     -H 'Content-Type: application/json' \
-    -d '{"model": "KBLab/kb-whisper-large"}'
+    -d '{"model": "/models/extra/faster-whisper-large-v3-ct2"}'
 ```
 
 ### 6 — Stop
@@ -131,13 +177,15 @@ WhisperVault/
 │       └── nginx.conf          Non-root nginx config: UDS proxy on port 8080
 │
 ├── models/                     Project-local model cache (not tracked in git)
-│   ├── cache/
-│   │   └── torch/hub/
-│   │       └── checkpoints/    Torch hub checkpoints (wav2vec2 alignment model)
-│   ├── kb_whisper_large/       (legacy local copy, superseded by HF hub cache)
-│   ├── pyannote_speaker_diarization/
-│   │   └── plda/               PLDA scoring weights for diarization
-│   └── wav2vec2_large_sv_lm/   Swedish wav2vec2 language model
+│   ├── kb-whisper-large-ct2/   Swedish ASR model (CTranslate2 format)
+│   ├── faster-whisper-large-v3-ct2/  English/multilingual ASR (CTranslate2)
+│   ├── wav2vec2-large-voxrex-swedish/  Swedish forced alignment
+│   ├── pyannote-speaker-diarization/   Speaker diarization pipeline
+│   ├── pyannote-segmentation/          Segmentation backbone
+│   ├── paraphrase-multilingual-MiniLM-L12-v2/  Speaker embeddings
+│   └── cache/
+│       └── torch/hub/
+│           └── checkpoints/    English alignment (torchaudio wav2vec2)
 │
 ├── whisperx/                   The whisperx Python package (separate git repo / subdir)
 │   └── whisperx/               Package source — installed into the container image
@@ -146,7 +194,7 @@ WhisperVault/
 ├── input/                      Audio files to transcribe (not tracked)
 │
 ├── run_whisper_offline.py      Legacy one-shot wrapper (still works, uses standalone mode)
-└── README.upstream.md          Original upstream whisperx README for reference
+└── CLAUDE.md                   Symlink → .github/copilot-instructions.md (agent instructions)
 ```
 
 > `models/`, `input/`, `output/`, and `whisperx/` are excluded from git via `.gitignore`.
@@ -155,38 +203,139 @@ WhisperVault/
 
 ## Required models
 
-Two separate model caches are mounted into the container at runtime, both read-only.
+All models are stored as **plain directories** under `./models/` — no HuggingFace symlink caches.
+This makes the project fully portable: `tar`, `rsync`, `scp`, or any copy method works without
+breaking anything.
 
-### 1 — HuggingFace hub cache  (`~/.cache/huggingface/hub`)
+The `./models/` directory is mounted read-only at `/models/extra` inside the container.
+`TORCH_HOME` is set to `/models/extra/cache/torch` so PyTorch finds its hub checkpoints there.
 
-This is the standard HF cache on the host.  The following entries are used:
+### Model inventory
 
-| Entry | Purpose |
-|---|---|
-| `models--KBLab--kb-whisper-large` | Main ASR model (Swedish-optimised Whisper large) |
-| `models--KBLab--wav2vec2-large-voxrex-swedish` | Forced alignment model for Swedish |
-| `models--pyannote--segmentation` | VAD / segmentation backbone |
-| `models--pyannote--speaker-diarization-community-1` | Speaker diarization pipeline |
-| `models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2` | Speaker embedding model |
+| Directory | Size | Purpose | Used by |
+|---|---|---|---|
+| `kb-whisper-large-ct2/` | 2.9 GB | Swedish ASR (CTranslate2 format) | `--model` |
+| `faster-whisper-large-v3-ct2/` | 2.9 GB | Multilingual/English ASR (CTranslate2) | `--model` |
+| `wav2vec2-large-voxrex-swedish/` | 2.4 GB | Swedish forced alignment | `--align-model` |
+| `paraphrase-multilingual-MiniLM-L12-v2/` | 926 MB | Speaker embeddings (all languages) | diarization sub-model |
+| `cache/torch/hub/checkpoints/` | 361 MB | English forced alignment (torchaudio) | automatic for `en` |
+| `pyannote-speaker-diarization/` | 32 MB | Speaker diarization pipeline | `--diarize-model` |
+| `pyannote-segmentation/` | 17 MB | Segmentation backbone | diarization sub-model |
 
-The pyannote diarization models are gated on HuggingFace.  You must accept the licence on the HF
-website and provide `HF_TOKEN` the first time you download them.  Once cached, the token is not
-needed for offline inference.
+### Downloading models
 
-Inside the container this cache is mounted at `/models/hf` and the env vars `HF_HOME` and
-`HF_HUB_CACHE` are both set to that path.  `HF_HUB_OFFLINE=1` is set by default so any attempt
-to make a network request will raise an error immediately rather than hanging.
+ASR models use the **CTranslate2** format published by Systran (or KBLab for Swedish).
+All other models are downloaded as plain directories via `huggingface_hub.snapshot_download()`.
 
-### 2 — Project models directory  (`./models/`)
-
-Mounted at `/models/extra` inside the container.  `TORCH_HOME` is set to `/models/extra/cache/torch`
-so PyTorch finds its hub checkpoints here.
-
-The key file is:
+```bash
+# Example: download a CT2 model
+pip install huggingface_hub
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download('Systran/faster-whisper-large-v3', local_dir='models/faster-whisper-large-v3-ct2',
+                  ignore_patterns=['*.md', '*.gitattributes'])
+"
 ```
-models/cache/torch/hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth
+
+The pyannote diarization models are **gated** on HuggingFace — you must accept the licence on the
+HF website and pass `token=` to `snapshot_download()` (or set `HF_TOKEN`) the first time you
+download them.  Once the files are in `models/`, no token is needed for offline inference.
+
+### Using models
+
+Model paths are passed to `manage.py start` as **container-side paths** (prefixed with
+`/models/extra/`):
+
+You can also run on GPU.  On a native Linux host with up‑to‑date drivers the
+`--gpus all` flag is sufficient; podman will expose the appropriate `/dev/
+`nvidia*` devices and libraries.  The `manage.py` helper will also add a
+matching `--device nvidia.com/gpu=…` binding automatically when you supply
+`--gpus`, which avoids problems with container images that expect the older
+syntax.  If you’re using Podman Desktop/Podman Machine you’ll need to install
+the NVIDIA Container Toolkit in the VM and generate a CDI spec (`nvidia-ctk cdi generate --output /etc/cdi/nvidia.yaml`).
+
+
+```bash
+# Swedish (CPU):
+python container/manage.py start \
+    --model /models/extra/kb-whisper-large-ct2 \
+    --align-model /models/extra/wav2vec2-large-voxrex-swedish \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cpu --compute-type float32 --language sv
+
+# Swedish on GPU (requires podman with `--gpus` support):
+python container/manage.py start \
+    --model /models/extra/kb-whisper-large-ct2 \
+    --align-model /models/extra/wav2vec2-large-voxrex-swedish \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cuda --gpus all --language sv
+
+# English (alignment model is built into torchaudio, no --align-model needed):
+python container/manage.py start \
+    --model /models/extra/faster-whisper-large-v3-ct2 \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cpu --compute-type float32 --language en
 ```
-This is the wav2vec2 checkpoint used by whisperx's alignment step.
+
+---
+
+## Transferring to another machine
+
+The project is designed to be fully portable.  All models are plain files — no symlinks, no
+HuggingFace blob caches.
+
+### What to transfer
+
+| What | In git? | How to get it |
+|---|---|---|
+| Repository code | ✅ | `git clone` |
+| `whisperx/` package source | ❌ | `git clone https://github.com/m-bain/whisperX` into `whisperx/` |
+| `models/` (all model weights) | ❌ | Copy from existing machine **or** re-download (see above) |
+| `.venv/` (host-side Python venv) | ❌ | Recreate: `python -m venv .venv && pip install httpx pre-commit` |
+| Container images | ❌ | Rebuild: `podman build -t whisperx-local -f container/Containerfile .` |
+
+### Transfer via tar (recommended for air-gapped machines)
+
+```bash
+# On the source machine — exclude venv, output, input:
+tar cf WhisperVault.tar \
+    --exclude='.venv' --exclude='output' --exclude='input' \
+    --exclude='models/*/.cache' \
+    -C /path/to WhisperVault/
+
+# On the target machine:
+tar xf WhisperVault.tar
+cd WhisperVault
+python -m venv .venv && source .venv/bin/activate && pip install httpx
+podman build -t whisperx-local -f container/Containerfile .
+python container/manage.py start \
+    --model /models/extra/faster-whisper-large-v3-ct2 \
+    --device cpu --compute-type float32 --language en
+```
+
+### Transfer via git clone + model copy
+
+```bash
+# 1. Clone the repo
+git clone <repo-url> WhisperVault && cd WhisperVault
+
+# 2. Get the whisperx package
+git clone https://github.com/m-bain/whisperX whisperx
+
+# 3. Copy models from an existing machine (rsync, scp, USB drive, etc.)
+rsync -a user@source:/path/to/WhisperVault/models/ models/
+
+# 4. Set up the host venv
+python -m venv .venv && source .venv/bin/activate && pip install httpx
+
+# 5. Build and start
+podman build -t whisperx-local -f container/Containerfile .
+python container/manage.py start --model /models/extra/faster-whisper-large-v3-ct2 \
+    --device cpu --compute-type float32 --language en
+```
+
+> **Note:** The `models/` directory is ~9.5 GB.  If bandwidth is limited, transfer only the models
+> you need (e.g. skip the Swedish models if you only need English, or vice versa).
 
 ---
 
@@ -216,7 +365,9 @@ python container/manage.py build-nginx   # builds only the nginx image
 
 ```bash
 python container/manage.py start \
-    --model KBLab/kb-whisper-large \
+    --model /models/extra/kb-whisper-large-ct2 \
+    --align-model /models/extra/wav2vec2-large-voxrex-swedish \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
     --device cpu \
     --compute-type float32 \
     --language sv
@@ -226,7 +377,7 @@ This runs the container with:
 - `--network=none` — zero network access
 - `--cap-drop=ALL` — no Linux capabilities
 - `--security-opt=no-new-privileges:true`
-- two read-only volume mounts (HF cache and `./models/`)
+- a read-only volume mount (`./models/` → `/models/extra`)
 - one read-write bind for the socket directory (`/tmp/whisperx-api` → `/run/api`)
 
 The server loads the ASR model once at startup, then stays resident.  Subsequent requests reuse the
@@ -289,21 +440,21 @@ python container/manage.py transcribe /path/to/audio.wav \
     --output-dir ./output
 ```
 
-Via `curl` (through the nginx sidecar on port 8088):
+Via `curl` (returns JSON — use `jq` to extract the formatted text):
 
 ```bash
-curl http://localhost:8088/transcribe \
-    -F "audio=@/path/to/audio.wav" \
-    -F 'params={"language":"sv","diarize":true,"output_format":"srt"}'
-```
-
-Via `curl` (directly over the Unix socket, no nginx needed):
-
-```bash
-curl --unix-socket /tmp/whisperx-api/whisperx.sock \
+# Over the Unix socket:
+curl -s --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/transcribe \
     -F "audio=@/path/to/audio.wav" \
-    -F 'params={"language":"sv","diarize":true,"output_format":"txt"}'
+    -F 'params={"language":"sv","diarize":true,"output_format":["srt","txt"]}' \
+  | jq -r '.outputs.srt' > output/audio.srt
+
+# Through the nginx sidecar:
+curl -s http://localhost:8088/transcribe \
+    -F "audio=@/path/to/audio.wav" \
+    -F 'params={"language":"sv","diarize":true,"output_format":"txt"}' \
+  | jq -r '.outputs.txt' > output/audio.txt
 ```
 
 ---
@@ -321,13 +472,13 @@ Returns the current server state.  Useful for liveness/readiness checks.
 {
   "ready": true,
   "reloading": false,
-  "model": "KBLab/kb-whisper-large",
+  "model": "/models/extra/kb-whisper-large-ct2",
   "device": "cpu",
   "compute_type": "float32",
   "language": "sv",
   "vad_method": "pyannote",
   "align_models_cached": ["sv"],
-  "diarize_pipelines_cached": ["pyannote/speaker-diarization-community-1"]
+  "diarize_pipelines_cached": ["/models/extra/pyannote-speaker-diarization"]
 }
 ```
 
@@ -335,8 +486,14 @@ Returns the current server state.  Useful for liveness/readiness checks.
 
 ### `GET /models`
 
-Scans the HuggingFace hub cache (`/models/hf` inside the container) and returns every model found,
-classified by its role in the whisperx pipeline.
+Scans the model caches that are mounted into the container – both the
+HuggingFace hub cache (`/models/hf`) **and** the project-local model
+directory (`/models/extra`).  Any subdirectory or HF cache entry is
+reported, and each is classified by its role in the whisperx pipeline.
+
+This makes the API useful for discovering models that were downloaded via
+`huggingface_hub` as well as manually copied CT2 models and other plain
+directories.
 
 ```bash
 curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/models
@@ -349,8 +506,7 @@ curl http://localhost:8088/models
 {
   "available": [
     {
-      "model_id": "KBLab/kb-whisper-large",
-      "cache_path": "/models/hf/models--KBLab--kb-whisper-large",
+      "model_id": "/models/extra/kb-whisper-large-ct2",
       "role": "asr",
       "loaded": true,
       "description": "Swedish-optimised Whisper large model ...",
@@ -358,7 +514,7 @@ curl http://localhost:8088/models
       "architecture": "faster-whisper"
     },
     {
-      "model_id": "pyannote/speaker-diarization-community-1",
+      "model_id": "/models/extra/pyannote-speaker-diarization",
       "role": "diarization",
       "loaded": false
     }
@@ -371,7 +527,7 @@ curl http://localhost:8088/models
     "embedding":   [ ... ]
   },
   "currently_loaded": {
-    "asr": "KBLab/kb-whisper-large",
+    "asr": "/models/extra/kb-whisper-large-ct2",
     "alignment": ["sv"],
     "diarization": []
   }
@@ -422,10 +578,12 @@ curl http://localhost:8088/params
                        "description": "..." }
   },
   "reload_params": {
-    "model":      { "type": "str", "default": "small", "current_value": "KBLab/kb-whisper-large",
+    "model":      { "type": "str", "default": "small", "current_value": "/models/extra/kb-whisper-large-ct2",
                     "env_var": "WHISPERX_MODEL", "description": "..." },
     "beam_size":  { "type": "int", "default": 5,       "current_value": 5,
-                    "env_var": "WHISPERX_BEAM_SIZE", "description": "..." }
+                    "env_var": "WHISPERX_BEAM_SIZE", "description": "..." },
+    "repetition_penalty": { "type": "float", "default": 1.0, "current_value": 1.0,
+                    "env_var": "WHISPERX_REPETITION_PENALTY", "description": "Decoding repetition penalty." }
   },
   "output_formats": ["txt", "srt", "vtt", "tsv", "json", "aud"],
   "notes": {
@@ -610,7 +768,7 @@ The original workflow (one container invocation per file, then `--rm`) still wor
 
 ```bash
 python run_whisper_offline.py /path/to/audio.wav \
-    --model KBLab/kb-whisper-large --device cpu --compute_type float32 \
+    --model /models/extra/kb-whisper-large-ct2 --device cpu --compute_type float32 \
     --diarize --output_dir ./output --output_format txt
 ```
 

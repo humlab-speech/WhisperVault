@@ -254,8 +254,10 @@ def main() -> None:
         sys.exit(
             f"Socket not found: {args.socket}\n"
             "Is the server running?  Start it with:\n"
-            "  python container/manage.py start --model KBLab/kb-whisper-large "
-            "--device cpu --compute-type float32 --language sv"
+            "  python container/manage.py start "
+            "--model /models/extra/kb-whisper-large-ct2 "
+            "--device cpu --compute-type float32 --language sv\n"
+            "(or on GPU: add `--device cuda --gpus all`)"
         )
 
     with make_client(args.socket) as client:
