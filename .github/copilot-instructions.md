@@ -64,6 +64,10 @@ whisperx/                whisperx Python package    [git-ignored, separate git r
   ```
 - Always run `pre-commit run --all-files` (or let the git hook run it) before committing.
 
+### Git
+- Always use plain `git` CLI commands in the terminal — never use MCP git tools (e.g. `mcp_gitkraken_*`).
+- Stage and commit via `git add` / `git commit`; check status with `git status` / `git diff`.
+
 ### Commit messages
 - Keep messages short and to the point — one concise subject line describing *what* changed and *why*.
 - Do **not** include line counts, file counts, or before/after comparisons.
