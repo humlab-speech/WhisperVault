@@ -33,7 +33,6 @@ container/
     nginx.conf           non-root UDS proxy on port 8080
 
 transcribe.py            standalone CLI client (only dep: httpx)
-run_whisper_offline.py   legacy one-shot wrapper (still works)
 
 models/                  project-local model cache  [git-ignored]
 output/                  transcription output files [git-ignored]

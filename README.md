@@ -227,7 +227,6 @@ WhisperVault/
 ├── output/                     Transcription results written by manage.py (not tracked)
 ├── input/                      Audio files to transcribe (not tracked)
 │
-├── run_whisper_offline.py      Legacy one-shot wrapper (still works, uses standalone mode)
 └── CLAUDE.md                   Symlink → .github/copilot-instructions.md (agent instructions)
 ```
 
@@ -792,22 +791,6 @@ python container/manage.py reload --model large-v2 --beam-size 10
 
 All cached alignment and diarization pipelines are also invalidated and will be lazily re-loaded on
 the next request that needs them.
-
----
-
-## One-shot legacy mode
-
-The original workflow (one container invocation per file, then `--rm`) still works via
-`run_whisper_offline.py`:
-
-```bash
-python run_whisper_offline.py /path/to/audio.wav \
-    --model /models/extra/kb-whisper-large-ct2 --device cpu --compute_type float32 \
-    --diarize --output_dir ./output --output_format txt
-```
-
-This prepends `"standalone"` to the container arguments, causing `server.py` to hand control
-directly to the whisperx CLI instead of starting the API server.
 
 ---
 

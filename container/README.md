@@ -134,38 +134,8 @@ podman run --rm --network=none \
     --diarize --output_dir /output --output_format txt
 ```
 
-To make this simpler, two small helpers live in this directory:
-
-* `run.sh` – a bare‑bones shell wrapper useful for quick tests.
-* `run_whisper_offline.py` – a richer Python script that understands a
-  couple of common options and injects a reasonable default of
-  ``--best_of 10`` if you do not specify one.
-
-Examples (run from the repository root):
-
-```bash
-# shell helper:
-container/run.sh /path/to/ZOOM0020_LR.wav \
-    --model KBLab/kb-whisper-large --device cpu --diarize \
-    --output_dir $PWD/output --output_format txt
-
-# python helper (prints the podman command before executing):
-# use whichever Python interpreter you normally use for this repo
-# (e.g. `./.venv/bin/python`); the shebang defaults to `python3` and
-# the script warns if that resolves to a pyenv shim.
-container/run_whisper_offline.py /path/to/ZOOM0020_LR.wav \
-    --model KBLab/kb-whisper-large --device cpu --diarize \
-    --output_dir $PWD/output --output_format txt
-```
-
-Both scripts enforce network isolation, mount only the required files, and
-forward any remaining whisperx CLI arguments.
-
-The script automatically adds `--network=none` and mounts just the single
-input file and the required caches; it also creates the output directory if
-necessary.  You may still pass any other `whisperx` CLI arguments after the
-filename.
-
 The resulting `/output/ZOOM0020_LR.txt` (or `.srt`, `.json`, etc.) will
-contain the speaker‑labelled transcription produced earlier by the native
-CLI.  Adjust the mounted paths as needed for your environment.
+contain the speaker‑labelled transcription.  Adjust the mounted paths as needed for your environment.
+
+For a higher-level interface, use `manage.py` (on the host) and `transcribe.py` instead of
+invoking the container directly.

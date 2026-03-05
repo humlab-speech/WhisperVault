@@ -10,3 +10,4 @@ demo/
 models/
 input/
 output/
+*.srt

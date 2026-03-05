@@ -1223,7 +1223,7 @@ if __name__ == "__main__":
     #   anything else         →  standalone CLI passthrough (one-shot, --rm)
     #
     # The Containerfile sets CMD ["server"] so the default is always server mode.
-    # run_whisper_offline.py prepends "standalone" before the audio path.
+    # Pass "standalone" as the first arg to invoke the whisperx CLI directly.
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "server"
 
