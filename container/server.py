@@ -24,6 +24,8 @@ WHISPERX_LANGUAGE            ISO-639-1 code or None      (None = auto-detect)
 WHISPERX_BATCH_SIZE          int                         (8)
 WHISPERX_THREADS             int                         (4)
 WHISPERX_MODEL_DIR           custom download root        (None)
+WHISPERX_ALIGN_MODEL         alignment model name/path   (None = auto per language)
+WHISPERX_DIARIZE_MODEL       diarization pipeline path    (pyannote/speaker-diarization-community-1)
 HF_TOKEN                     HuggingFace token           (None)
 WHISPERX_BEAM_SIZE           int                         (5)
 WHISPERX_BEST_OF             int                         (10)
@@ -39,6 +41,8 @@ WHISPERX_SUPPRESS_NUMERALS   true | false                (false)
 WHISPERX_CONDITION_ON_PREV   true | false                (false)
 WHISPERX_INITIAL_PROMPT      string                      (None)
 WHISPERX_HOTWORDS            string                      (None)
+WHISPERX_REPETITION_PENALTY  float                       (1.0)
+WHISPERX_NO_REPEAT_NGRAM     int                         (0)
 WHISPERX_VAD_METHOD          pyannote | silero           (pyannote)
 WHISPERX_VAD_ONSET           float                       (0.500)
 WHISPERX_VAD_OFFSET          float                       (0.363)
@@ -145,12 +149,18 @@ class ModelConfig:
     batch_size: int = field(default_factory=lambda: _env_int("WHISPERX_BATCH_SIZE", 8))
     threads: int = field(default_factory=lambda: _env_int("WHISPERX_THREADS", 4))
     model_dir: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_MODEL_DIR"))
+    align_model: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_ALIGN_MODEL"))
+    diarize_model: str = field(
+        default_factory=lambda: os.environ.get("WHISPERX_DIARIZE_MODEL", "pyannote/speaker-diarization-community-1")
+    )
     hf_token: Optional[str] = field(default_factory=lambda: _env_opt_str("HF_TOKEN"))
     # ── ASR / decoding options (baked in at load_model time) ────────────────
     beam_size: int = field(default_factory=lambda: _env_int("WHISPERX_BEAM_SIZE", 5))
     best_of: int = field(default_factory=lambda: _env_int("WHISPERX_BEST_OF", 10))
     patience: float = field(default_factory=lambda: _env_float("WHISPERX_PATIENCE", 1.0))
     length_penalty: float = field(default_factory=lambda: _env_float("WHISPERX_LENGTH_PENALTY", 1.0))
+    repetition_penalty: float = field(default_factory=lambda: _env_float("WHISPERX_REPETITION_PENALTY", 1.0))
+    no_repeat_ngram_size: int = field(default_factory=lambda: _env_int("WHISPERX_NO_REPEAT_NGRAM", 0))
     temperature: float = field(default_factory=lambda: _env_float("WHISPERX_TEMPERATURE", 0.0))
     temperature_increment_on_fallback: Optional[float] = field(
         default_factory=lambda: _env_float("WHISPERX_TEMP_INCREMENT", 0.2)
@@ -195,6 +205,8 @@ def _build_asr_options(cfg: ModelConfig) -> dict:
         "best_of": cfg.best_of,
         "patience": cfg.patience,
         "length_penalty": cfg.length_penalty,
+        "repetition_penalty": cfg.repetition_penalty,
+        "no_repeat_ngram_size": cfg.no_repeat_ngram_size,
         "temperatures": temp,
         "compression_ratio_threshold": cfg.compression_ratio_threshold,
         "log_prob_threshold": cfg.logprob_threshold,
@@ -211,6 +223,17 @@ def _load_models(cfg: ModelConfig) -> None:
     global _config, _asr_model, _align_models, _diarize_pipelines, _ready
     if cfg.threads > 0:
         torch.set_num_threads(cfg.threads)
+
+    # ── early CUDA sanity check ────────────────────────────────────────────
+    # Fail immediately with a clear message rather than letting CTranslate2
+    # raise a cryptic error or silently fall back to CPU without any warning.
+    if cfg.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA device requested (device='cuda') but torch.cuda.is_available() "
+            "returned False.  Ensure the container was started with --gpus and that "
+            "GPU drivers are accessible inside the container."
+        )
+
     logger.info("Loading ASR model %s on %s (%s) …", cfg.model, cfg.device, cfg.compute_type)
     t0 = time.time()
     asr = _load_asr_model(
@@ -231,6 +254,20 @@ def _load_models(cfg: ModelConfig) -> None:
         threads=max(cfg.threads, 4),
         use_auth_token=cfg.hf_token,
     )
+
+    # ── verify the model is actually on the requested device ──────────────
+    # CTranslate2 can silently fall back to CPU even when device='cuda' is
+    # passed (e.g. missing CUDA libraries).  Detect this and raise so the
+    # caller always knows the true device rather than recording a lie in
+    # _config.
+    actual_device: Optional[str] = getattr(getattr(asr, "model", None), "device", None)
+    if actual_device is not None and actual_device != cfg.device:
+        raise RuntimeError(
+            f"Requested device='{cfg.device}' but the ASR model loaded on "
+            f"'{actual_device}'.  CTranslate2 may have silently fallen back.  "
+            "Check GPU availability and the container --gpus flag."
+        )
+
     logger.info("ASR model ready in %.1fs", time.time() - t0)
     _config = cfg
     _asr_model = asr
@@ -261,6 +298,7 @@ def _get_align_model(language: str, cfg: ModelConfig):
         m, meta = load_align_model(
             language,
             cfg.device,
+            model_name=cfg.align_model,
             model_dir=cfg.model_dir,
             model_cache_only=True,
         )
@@ -476,6 +514,50 @@ def _scan_hf_cache(hf_cache_dir: str) -> list[dict]:
     return results
 
 
+def _scan_extra_models(extra_dir: str) -> list[dict]:
+    """
+    Scan the project-local models directory (mounted at /models/extra) and
+    return one entry per subdirectory.  This catches models that are not
+    stored in the HF hub cache, e.g. CTranslate2 ASR models or other plain
+    directories.
+
+    Each entry has the same structure as _scan_hf_cache, except the
+    "model_id" is simply the basename of the directory (the caller may add
+    extra context later).  If the basename exactly matches a key in
+    _MODEL_METADATA we copy the metadata; otherwise the record is marked
+    "unknown".
+    """
+    results = []
+    try:
+        root = Path(extra_dir)
+        if not root.is_dir():
+            return results
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            # intentionally keep the model_id/simple name so callers can see the
+            # actual directory layout; metadata lookup may add more info
+            model_id = name
+            meta = _MODEL_METADATA.get(model_id, {})
+            record: dict = {
+                "model_id": model_id,
+                "cache_path": str(entry),
+                "role": meta.get("role", "unknown"),
+                "loaded": bool(_config and _config.model and _config.model.endswith(name)),
+            }
+            if "description" in meta:
+                record["description"] = meta["description"]
+            if "languages" in meta:
+                record["languages"] = meta["languages"]
+            if "architecture" in meta:
+                record["architecture"] = meta["architecture"]
+            results.append(record)
+    except Exception as exc:
+        logger.warning("Could not scan extra models at %s: %s", extra_dir, exc)
+    return results
+
+
 @app.get("/models")
 async def models():
     """
@@ -502,7 +584,20 @@ async def models():
         plus any lazily-loaded alignment / diarization pipelines).
     """
     hf_cache = os.environ.get("HF_HUB_CACHE", "/models/hf")
-    all_models = _scan_hf_cache(hf_cache)
+    extra_cache = "/models/extra"
+
+    hf_models = _scan_hf_cache(hf_cache)
+    extra_models = _scan_extra_models(extra_cache)
+
+    # merge the two lists, preferring hf_models when the IDs collide
+    all_models: list[dict] = []
+    seen = set()
+    for m in hf_models + extra_models:
+        mid = m["model_id"]
+        if mid in seen:
+            continue
+        seen.add(mid)
+        all_models.append(m)
 
     # Group by role
     by_role: dict[str, list] = {}
@@ -692,6 +787,15 @@ def _model_config_schema() -> dict:
             "env": "WHISPERX_MODEL_DIR",
             "description": "Custom directory for model downloads. " "Null = use the default HF/torch cache.",
         },
+        "align_model": {
+            "env": "WHISPERX_ALIGN_MODEL",
+            "description": "Alignment model name or local path. "
+            "Null = auto-select the best wav2vec2 model for the detected language.",
+        },
+        "diarize_model": {
+            "env": "WHISPERX_DIARIZE_MODEL",
+            "description": "Diarization pipeline model name or local path.",
+        },
         "hf_token": {
             "env": "HF_TOKEN",
             "description": "HuggingFace access token for gated models " "(e.g. pyannote diarization). Not logged.",
@@ -705,6 +809,15 @@ def _model_config_schema() -> dict:
         "length_penalty": {
             "env": "WHISPERX_LENGTH_PENALTY",
             "description": "Exponential length penalty applied to beam scores.",
+        },
+        "repetition_penalty": {
+            "env": "WHISPERX_REPETITION_PENALTY",
+            "description": "Decoding repetition penalty (faster-whisper). Values >1.0 discourage repeated tokens.",
+        },
+        "no_repeat_ngram_size": {
+            "env": "WHISPERX_NO_REPEAT_NGRAM",
+            "description": "Prevent repetition of n-grams of this size. 0 = disabled. "
+            "Try 2–3 to reduce hallucinations.",
         },
         "temperature": {
             "env": "WHISPERX_TEMPERATURE",
@@ -867,6 +980,8 @@ async def reload_models(body: dict):
         raise HTTPException(503, "Already reloading, please wait")
     async with _lock:
         _reloading = True
+        # Remember the current config so we can recover if the new load fails.
+        saved_cfg = _config
         try:
             # Start from current config, apply only the supplied overrides
             if _config is not None:
@@ -879,7 +994,14 @@ async def reload_models(body: dict):
             _unload_models()
             _load_models(new_cfg)
         except Exception as exc:
-            logger.exception("Reload failed")
+            logger.exception("Reload failed; attempting to restore previous model")
+            # Try to restore the previous model so the server stays usable.
+            if saved_cfg is not None:
+                try:
+                    _load_models(saved_cfg)
+                    logger.info("Restored previous model after failed reload")
+                except Exception as restore_exc:
+                    logger.exception("Could not restore previous model either: %s", restore_exc)
             raise HTTPException(500, f"Reload failed: {exc}") from exc
         finally:
             _reloading = False
@@ -1000,7 +1122,7 @@ async def transcribe(
             if p.get("diarize"):
                 diarize_model_name = p.get(
                     "diarize_model",
-                    "pyannote/speaker-diarization-community-1",
+                    cfg.diarize_model,
                 )
                 pipeline = _get_diarize_pipeline(diarize_model_name, cfg)
                 return_emb = bool(p.get("speaker_embeddings", False))

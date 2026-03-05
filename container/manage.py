@@ -17,6 +17,10 @@ Subcommands
   transcribe  Transcribe an audio file and write outputs to disk
 
 Requirements (host):  podman, httpx>=0.23  (pip install httpx)
+#
+# If you want to run on a GPU the host must have appropriate drivers and
+# a recent Podman with `--gpus` support (NVIDIA or ROCm).  The --gpus flag is
+# passed through by cmd_start; use `--device cuda` in combination with it.
 """
 
 import argparse
@@ -107,8 +111,21 @@ def cmd_start(args) -> int:
         print(f"warning: models directory '{models_dir}' does not exist – container may fail to find models")
 
     hf_cache_dir = os.path.abspath(args.hf_cache_dir)
+    # always ensure directory exists; we mount it read-only, so an empty
+    # directory is harmless.  this avoids podman complaining when the path is
+    # absent (see user report).
+    try:
+        os.makedirs(hf_cache_dir, exist_ok=True)
+    except Exception as exc:
+        print(
+            f"warning: could not create HF cache directory '{hf_cache_dir}': {exc}",
+            file=sys.stderr,
+        )
     if not os.path.isdir(hf_cache_dir):
-        print(f"warning: HF cache directory '{hf_cache_dir}' does not exist – models may not be found")
+        print(
+            f"warning: HF cache directory '{hf_cache_dir}' is not a directory –" " container may fail to find models",
+            file=sys.stderr,
+        )
 
     # Mapping: argparse attribute → container env var
     env_map = {
@@ -127,6 +144,10 @@ def cmd_start(args) -> int:
         "temperature": "WHISPERX_TEMPERATURE",
         "initial_prompt": "WHISPERX_INITIAL_PROMPT",
         "hotwords": "WHISPERX_HOTWORDS",
+        "align_model": "WHISPERX_ALIGN_MODEL",
+        "diarize_model": "WHISPERX_DIARIZE_MODEL",
+        "repetition_penalty": "WHISPERX_REPETITION_PENALTY",
+        "no_repeat_ngram_size": "WHISPERX_NO_REPEAT_NGRAM",
     }
     env_args: list[str] = []
     for attr, env_name in env_map.items():
@@ -138,37 +159,44 @@ def cmd_start(args) -> int:
     if hf_token:
         env_args += ["-e", f"HF_TOKEN={hf_token}"]
 
-    podman_cmd = (
-        [
-            "podman",
-            "run",
-            "--detach",
-            "--name",
-            CONTAINER_NAME,
-            "--replace",  # remove any container with the same name first
-            "--network=none",
-            # Drop all Linux capabilities — whisperx only needs plain Python/PyTorch.
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges:true",
-            # UDS socket directory (server creates the .sock file inside here)
-            "-v",
-            f"{socket_dir}:{os.path.dirname(CONTAINER_SOCKET)}:z",
-            # HF hub model cache – read-only (the main model weights live here)
-            "-v",
-            f"{hf_cache_dir}:/models/hf:ro",
-            # extra models dir for torch cache, alignment models, etc. – read-only
-            "-v",
-            f"{models_dir}:/models/extra:ro",
-            "-e",
-            "HF_HOME=/models/hf",
-            "-e",
-            "HF_HUB_CACHE=/models/hf",
-            "-e",
-            "TORCH_HOME=/models/extra/cache/torch",
-        ]
-        + env_args
-        + [IMAGE_NAME]
-    )
+    podman_cmd = [
+        "podman",
+        "run",
+        "--detach",
+        "--name",
+        CONTAINER_NAME,
+        "--replace",  # remove any container with the same name first
+        "--network=none",
+        # Drop all Linux capabilities — whisperx only needs plain Python/PyTorch.
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+    ]
+    # GPU passthrough (podman 4.6+ supports --gpus like Docker).
+    # In practice some images (including our CUDA base) expect the device nodes
+    # to be visible via the old `--device nvidia.com/gpu=…` syntax.  Add that
+    # automatically alongside --gpus so the command works consistently.
+    if getattr(args, "gpus", None):
+        # the value may be "all" or a comma-separated list
+        podman_cmd += ["--gpus", str(args.gpus)]
+        podman_cmd += ["--device", f"nvidia.com/gpu={args.gpus}"]
+    podman_cmd += [
+        # UDS socket directory (server creates the .sock file inside here)
+        "-v",
+        f"{socket_dir}:{os.path.dirname(CONTAINER_SOCKET)}:z",
+        # HF hub model cache – read-only (the main model weights live here)
+        "-v",
+        f"{hf_cache_dir}:/models/hf:ro",
+        # extra models dir for torch cache, alignment models, etc. – read-only
+        "-v",
+        f"{models_dir}:/models/extra:ro",
+        "-e",
+        "HF_HOME=/models/hf",
+        "-e",
+        "HF_HUB_CACHE=/models/hf",
+        "-e",
+        "TORCH_HOME=/models/extra/cache/torch",
+    ]
+    podman_cmd = podman_cmd + env_args + [IMAGE_NAME]
 
     print(f"Starting container '{CONTAINER_NAME}' from image '{IMAGE_NAME}' …")
     result = subprocess.run(podman_cmd)
@@ -180,6 +208,19 @@ def cmd_start(args) -> int:
     print(f"Waiting for server to become ready at {sock}", end="", flush=True)
     for _ in range(180):  # up to 3 minutes (model load can be slow on CPU)
         time.sleep(1)
+        # check whether the container is still running; if it died we should bail
+        status = subprocess.run(
+            ["podman", "inspect", "--format", "{{.State.Status}}", CONTAINER_NAME],
+            capture_output=True,
+            text=True,
+        )
+        if status.returncode == 0:
+            state = status.stdout.strip()
+            if state not in ("running", "created"):
+                # container exited or errored before socket appeared
+                print("\ncontainer exited unexpectedly (state={})".format(state), file=sys.stderr)
+                print(f"Check logs with:  podman logs {CONTAINER_NAME}", file=sys.stderr)
+                return 1
         print(".", end="", flush=True)
         if Path(sock).exists():
             health = _call_health(socket_dir)
@@ -247,6 +288,8 @@ def cmd_reload(args) -> int:
         "vad_offset",
         "chunk_size",
         "temperature",
+        "repetition_penalty",
+        "no_repeat_ngram_size",
         "initial_prompt",
         "hotwords",
     ):
@@ -368,6 +411,32 @@ def _add_model_config_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--temperature", type=float, default=None)
     p.add_argument("--initial-prompt", dest="initial_prompt", default=None)
     p.add_argument("--hotwords", default=None)
+    p.add_argument(
+        "--repetition-penalty",
+        dest="repetition_penalty",
+        type=float,
+        default=None,
+        help="Decoding repetition penalty (faster-whisper TranscriptionOptions.repetition_penalty).",
+    )
+    p.add_argument(
+        "--no-repeat-ngram-size",
+        dest="no_repeat_ngram_size",
+        type=int,
+        default=None,
+        help=(
+            "Prevent n-gram repetition of this size during decoding. "
+            "0 = disabled. Try 2 or 3 to reduce hallucinations."
+        ),
+    )
+    p.add_argument(
+        "--align-model",
+        dest="align_model",
+        default=None,
+        help="Alignment model name or local path (default: auto per language)",
+    )
+    p.add_argument(
+        "--diarize-model", dest="diarize_model", default=None, help="Diarization pipeline name or local path"
+    )
 
 
 # ── nginx sidecar commands ───────────────────────────────────────────────────
@@ -523,11 +592,24 @@ def main() -> None:
         default=DEFAULT_HF_CACHE,
         help=(
             "Host path to the HuggingFace hub cache. "
-            "Auto-detected: uses ./models/hf if non-empty, otherwise ~/.cache/huggingface/hub."
+            "Always defaults to ./models/hf (no global cache is mounted). "
+            "Use this argument to override, e.g. when pre-populating a custom "
+            "cache directory."
         ),
     )
     p_start.add_argument(
         "--hf-token", dest="hf_token", default=None, help="HuggingFace token (falls back to $HF_TOKEN)"
+    )
+    p_start.add_argument(
+        "--gpus",
+        dest="gpus",
+        default=None,
+        help=(
+            "GPU devices to expose to the container. ``all`` passes all visible GPUs,"
+            " or use a comma-separated list like ``0,1``.  Requires a recent Podman with"
+            " NVIDIA/AMD support; omit to run on CPU only.  The script also adds a"
+            " matching ``--device nvidia.com/gpu=…`` binding for compatibility."
+        ),
     )
     _add_model_config_args(p_start)
 

@@ -20,7 +20,7 @@ at runtime from the host cache.
 ## Directory layout inside container
 
 - `/app` – cloned repository, entrypoint script, and Python install
-- `/models/hf` – hf hub cache (mount your host `~/.cache/huggingface/hub` here)
+- `/models/hf` – hf hub cache (ideally the project-local copy under `./models/hf`; the container no longer mounts your global `~/.cache` by default)
 - `/models/cache` – general cache location (the container writes nothing here but it is used by
   `TORCH_HOME` to store the alignment model and other torch assets when mounted read-only)
 - `/input` – audio files you wish to transcribe
@@ -42,7 +42,7 @@ Any arguments you supply after the audio file are passed through unchanged:
 
 ```bash
 podman run --rm \
-    -v /home/user/.cache/huggingface/hub:/models/hf:z \
+    -v $PWD/models:/models:ro \
     -v /path/to/input:/input:z \
     -v /path/to/output:/output:z \
     whisperx-local \
@@ -97,7 +97,7 @@ To run with zero network access:
 
 ```bash
 podman run --rm --network=none \
-    -v /home/user/.cache/huggingface/hub:/models/hf:z \
+    -v $PWD/models:/models:ro \
     -v /path/to/input:/input:z \
     -v /path/to/output:/output:z \
     whisperx-local \
@@ -124,7 +124,6 @@ podman build -t whisperx-local -f container/Containerfile .
 
 # long-form invocation (what the script generates for you):
 podman run --rm --network=none \
-    -v ~/.cache/huggingface/hub:/models/hf:z \
     -v "$PWD/models":/models:ro \
     -v "$PWD/ZOOM0020_LR.wav":/input/ZOOM0020_LR.wav:ro \
     -v "$PWD/output":/output:z \
