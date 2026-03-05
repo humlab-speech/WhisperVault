@@ -1,6 +1,7 @@
-# GitHub Copilot — project instructions
+# Project instructions (Copilot + Claude)
 
 This file is read automatically by GitHub Copilot in every session.
+CLAUDE.md at the project root is a symlink to this file so Claude Code reads it too.
 Keep it up to date when the architecture or conventions change.
 
 ---
@@ -51,10 +52,11 @@ whisperx/                whisperx Python package    [git-ignored, separate git r
 - Async FastAPI handlers; the asyncio lock `_lock` serialises model access
 
 ### Pre-commit
-- A host-side venv lives at `whisperx/.venv` — activate it before committing:
+- A host-side venv lives at project root (`./.venv`) — activate it before committing:
   ```bash
-  source whisperx/.venv/bin/activate
+  source .venv/bin/activate
   ```
+- Agents (including Copilot) must always call `configure_python_environment` at the start of a session or before any Python-related operation; this ensures the correct venv is used.
 - If `pre-commit` is not yet installed in that venv:
   ```bash
   pip install pre-commit
@@ -80,17 +82,21 @@ whisperx/                whisperx Python package    [git-ignored, separate git r
 - Model mounts are always `:ro`
 - Only the socket directory is writable (and contains only the socket file)
 
-### Model caches (two separate locations)
-- HF hub: `~/.cache/huggingface/hub` → mounted at `/models/hf` inside container
-  - `HF_HOME=/models/hf`  `HF_HUB_CACHE=/models/hf`  `HF_HUB_OFFLINE=1`
-- Project models: `./models/` → mounted at `/models/extra`
+### Model storage
+- All models live as **plain directories** under `./models/` — no HF symlink caches
+- `./models/` → mounted read-only at `/models/extra` inside the container
   - `TORCH_HOME=/models/extra/cache/torch`
+  - `HF_HUB_OFFLINE=1` is set so any accidental network request fails fast
+- ASR models use **CTranslate2** format (e.g. `models/kb-whisper-large-ct2/`)
+- Alignment / diarization models are plain HF snapshot directories
+- Container-side paths are passed via `--model`, `--align-model`, `--diarize-model`
+  (all prefixed `/models/extra/`)
 
 ### server.py internals
 - `ModelConfig` dataclass — all fields settable via env vars; see header docstring
 - `_TRANSCRIBE_PARAMS` dict — static schema for /transcribe per-request params
 - `_MODEL_METADATA` dict — known model descriptions keyed by HF model ID
-- `_scan_hf_cache()` — scans `/models/hf` at request time for `/models` endpoint
+- `_scan_hf_cache()` — scans model directories at request time for `/models` endpoint
 - `_model_config_schema()` — introspects `ModelConfig` at request time for `/params`
 - Two categories of params:
   - **reload params** (`ModelConfig` fields): baked in at load time, need `POST /reload`
@@ -110,8 +116,44 @@ podman build -t whisperx-nginx -f container/nginx/Containerfile container/nginx/
 
 ### Start / stop
 ```bash
+# GPU notes
+# On a real Linux host with NVIDIA/AMD drivers the --gpus flag is enough; podman
+# will expose the necessary devices.  In Podman Desktop/Podman Machine you must
+# also install the NVIDIA Container Toolkit in the VM and run
+# `nvidia-ctk cdi generate --output /etc/cdi/nvidia.yaml` before starting the
+# container.  A driver/runtime mismatch will cause a warning and fallback to CPU.
+
+# Swedish (with alignment + diarization)
 python container/manage.py start \
-    --model KBLab/kb-whisper-large --device cpu --compute-type float32 --language sv
+    --model /models/extra/kb-whisper-large-ct2 \
+    --align-model /models/extra/wav2vec2-large-voxrex-swedish \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cpu --compute-type float32 --language sv
+
+# the start command watches the container state; if the podman process exits before
+# the socket appears you'll get an immediate error and a hint to `podman logs`,
+# avoiding an infinite hang when the container crashes (e.g. due to a GPU issue).
+# If CUDA is requested but unavailable (torch.cuda.is_available() False, or
+# CTranslate2 falls back silently) the server raises immediately — it never
+# pretends to be on CUDA while running on CPU.
+
+# Same but on GPU (requires podman with --gpus support)
+# On a native Linux host with proper NVIDIA drivers the flag is all you need.
+# If you're running inside Podman Desktop/Podman Machine you must also install
+# the NVIDIA Container Toolkit and generate a CDI spec (`nvidia-ctk cdi generate
+# --output /etc/cdi/nvidia.yaml`).  Then either `--gpus all` or
+# `--device nvidia.com/gpu=all` will work.
+python container/manage.py start \
+    --model /models/extra/kb-whisper-large-ct2 \
+    --align-model /models/extra/wav2vec2-large-voxrex-swedish \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cuda --gpus all --language sv
+
+# English (torchaudio handles alignment automatically)
+python container/manage.py start \
+    --model /models/extra/faster-whisper-large-v3-ct2 \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cpu --compute-type float32 --language en
 
 python container/manage.py start-nginx --listen-host 0.0.0.0 --port 8088
 python container/manage.py stop
@@ -152,18 +194,21 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/models
 
 ---
 
-## Active model (as of last session)
-- ASR: `KBLab/kb-whisper-large` (Swedish-optimised Whisper large, KBLab)
-- Device: `cpu`, compute_type: `float32`, language: `sv`
-- Diarization: `pyannote/speaker-diarization-community-1` (lazy-loaded on first diarize request)
-- Alignment: `KBLab/wav2vec2-large-voxrex-swedish` (lazy-loaded on first align request)
+## Available models (as of last session)
+- ASR (Swedish): `models/kb-whisper-large-ct2/` — KBLab Swedish Whisper large, CTranslate2 format
+- ASR (English): `models/faster-whisper-large-v3-ct2/` — Whisper large-v3, CTranslate2 format
+- Alignment (Swedish): `models/wav2vec2-large-voxrex-swedish/` — plain directory
+- Alignment (English): built into torchaudio (`wav2vec2_fairseq_base_ls960_asr_ls960.pth` in `models/cache/torch/`)
+- Diarization: `models/pyannote-speaker-diarization/` + `models/pyannote-segmentation/` + `models/paraphrase-multilingual-MiniLM-L12-v2/`
+- Device: `cpu`, compute_type: `float32`
 
 ---
 
 ## What NOT to do
 - Do not add TCP port mappings (`-p`) to the whisperx container — socket only
 - Do not change `--network=none` on the whisperx container
-- Do not write to `/models/hf` or `/models/extra` from inside the container (both `:ro`)
+- Do not write to `/models/extra` from inside the container (`:ro`)
+- Do not use HuggingFace symlink caches — all models must be plain directories (portability)
 - Do not add model weights or audio files to git (`.gitignore` covers `models/`, `input/`, `output/`)
 - Do not use `requests` — use `httpx` with `HTTPTransport(uds=...)`
 - Do not store secrets in code — `HF_TOKEN` goes in env only
@@ -175,7 +220,7 @@ After editing `server.py` or `container/Containerfile`, rebuild and restart:
 ```bash
 podman build -t whisperx-local -f container/Containerfile . && \
 python container/manage.py start \
-    --model KBLab/kb-whisper-large --device cpu --compute-type float32 --language sv
+    --model /models/extra/kb-whisper-large-ct2 --device cpu --compute-type float32 --language sv
 ```
 Smoke test:
 ```bash
