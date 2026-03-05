@@ -32,6 +32,9 @@ work runs inside the podman container.
 python -m venv .venv          # one-time setup
 source .venv/bin/activate     # every shell before using the repo
 pip install httpx pre-commit  # httpx is the only runtime dependency; pre-commit is optional
+# or simply:
+#   pip install -r requirements.txt
+
 ```
 
 With the venv active you can run the host utilities like this:
