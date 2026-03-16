@@ -86,10 +86,16 @@ whisperx/                whisperx Python package    [git submodule — pinned co
 - Only the socket directory is writable (and contains only the socket file)
 
 ### Model storage
-- All models live as **plain directories** under `./models/` — no HF symlink caches
-- `./models/` → mounted read-only at `/models/extra` inside the container
+- All models live as **plain directories** under `./models/` — no HF symlink caches, no hub cache format
+- `./models/` → mounted read-only at `/models/extra` inside the container (the **only** model mount)
   - `TORCH_HOME=/models/extra/cache/torch`
   - `HF_HUB_OFFLINE=1` is set so any accidental network request fails fast
+  - There is **no** `/models/hf` mount — do not add one
+- Each model directory optionally contains an `alias` file with short names and metadata comments:
+  - `# role: asr|alignment|diarization|vad|embedding`
+  - `# language: sv` (repeatable)
+  - `# description: …`
+  - Plain-text aliases (one per line) that `manage.py` resolves at call time
 - ASR models use **CTranslate2** format (e.g. `models/kb-whisper-large-ct2/`)
 - Alignment / diarization models are plain HF snapshot directories
 - Container-side paths are passed via `--model`, `--align-model`, `--diarize-model`
@@ -98,8 +104,8 @@ whisperx/                whisperx Python package    [git submodule — pinned co
 ### server.py internals
 - `ModelConfig` dataclass — all fields settable via env vars; see header docstring
 - `_TRANSCRIBE_PARAMS` dict — static schema for /transcribe per-request params
-- `_MODEL_METADATA` dict — known model descriptions keyed by HF model ID
-- `_scan_hf_cache()` — scans model directories at request time for `/models` endpoint
+- `_read_model_metadata(path)` — reads `# role:` / `# language:` / `# description:` from a model's `alias` file
+- `_scan_extra_models()` — scans `/models/extra` at request time for `/models` endpoint
 - `_model_config_schema()` — introspects `ModelConfig` at request time for `/params`
 - Two categories of params:
   - **reload params** (`ModelConfig` fields): baked in at load time, need `POST /reload`

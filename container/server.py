@@ -73,10 +73,11 @@ import numpy as np
 import torch
 
 # ── configure caches before any whisperx import ──────────────────────────────
-# /models/hf   → the HF hub cache (host ~/.cache/huggingface/hub mounted here)
-# /models/extra → project models dir (torch cache, alignment models, etc.)
-os.environ.setdefault("HF_HOME", "/models/hf")
-os.environ.setdefault("HF_HUB_CACHE", "/models/hf")
+# All models live as plain directories under /models/extra (mounted from ./models/).
+# There is no HF hub cache mount.  HF_HUB_OFFLINE=1 prevents any accidental
+# network download attempt inside the network-isolated container.
+os.environ.setdefault("HF_HOME", "/tmp/hf_home")
+os.environ.setdefault("HF_HUB_CACHE", "/tmp/hf_home/hub")
 os.environ.setdefault("XDG_CACHE_HOME", "/models/extra/cache")
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("TORCH_HOME", "/models/extra/cache/torch")
@@ -489,43 +490,6 @@ def _read_model_metadata(model_dir: Path) -> dict:
     return meta
 
 
-def _scan_hf_cache(hf_cache_dir: str) -> list[dict]:
-    """
-    Scan the HuggingFace hub cache directory and return one entry per model found.
-
-    Each entry:
-      model_id      – the HF model ID (e.g. 'KBLab/kb-whisper-large')
-      cache_path    – absolute path to the cache directory for this model
-      role          – always 'unknown' (HF cache entries have no alias file)
-      loaded        – True if this model is currently loaded as the active ASR model
-    """
-    results = []
-    try:
-        cache = Path(hf_cache_dir)
-        if not cache.is_dir():
-            return results
-        for entry in sorted(cache.iterdir()):
-            name = entry.name
-            # HF hub entries are named  models--{org}--{repo}
-            if not name.startswith("models--"):
-                continue
-            # Reconstruct the model ID: 'models--KBLab--kb-whisper-large' → 'KBLab/kb-whisper-large'
-            parts = name[len("models--") :].split("--", 1)
-            if len(parts) != 2:
-                continue
-            model_id = f"{parts[0]}/{parts[1]}"
-            record: dict = {
-                "model_id": model_id,
-                "cache_path": str(entry),
-                "role": "unknown",
-                "loaded": bool(_config and _config.model == model_id),
-            }
-            results.append(record)
-    except Exception as exc:
-        logger.warning("Could not scan HF cache at %s: %s", hf_cache_dir, exc)
-    return results
-
-
 def _scan_extra_models(extra_dir: str) -> list[dict]:
     """
     Scan the project-local models directory (mounted at /models/extra) and
@@ -570,43 +534,27 @@ def _scan_extra_models(extra_dir: str) -> list[dict]:
 @app.get("/models")
 async def models():
     """
-    Report which models are available in the mounted model caches.
+    Report which models are available in the mounted model directory.
 
-    Scans the HuggingFace hub cache (mounted at /models/hf) and classifies
-    each entry by its role in the whisperx pipeline:
+    Scans /models/extra (the project ./models/ directory, mounted read-only)
+    and returns metadata read from each model's 'alias' file.
 
-      asr          Models that can be passed as 'model' to POST /reload
-                   or manage.py start --model.
-      alignment    Forced-alignment models selected automatically by language.
-      diarization  Speaker diarization pipelines selectable via the
-                   'diarize_model' transcribe param.
-      vad          Voice Activity Detection backbone (internal, not user-selectable).
+    Role values:
+      asr          Models that can be passed as 'model' to POST /reload.
+      alignment    Forced-alignment models (auto-selected per language).
+      diarization  Speaker diarization pipelines.
+      vad          Voice Activity Detection backbone (internal).
       embedding    Speaker embedding model (internal, used by diarization).
-      unknown      Present in the cache but not in the known-model registry.
+      unknown      Present on disk but no alias file with role metadata.
 
     Response fields
     ---------------
-    available       Full list of all cached models with role and metadata.
-    by_role         The same list grouped by role for easy filtering.
+    available       Full list of models with role and metadata.
+    by_role         The same list grouped by role.
     currently_loaded
-        Which models are actively loaded in memory right now (ASR model
-        plus any lazily-loaded alignment / diarization pipelines).
+        Which models are actively loaded in memory right now.
     """
-    hf_cache = os.environ.get("HF_HUB_CACHE", "/models/hf")
-    extra_cache = "/models/extra"
-
-    hf_models = _scan_hf_cache(hf_cache)
-    extra_models = _scan_extra_models(extra_cache)
-
-    # merge the two lists, preferring hf_models when the IDs collide
-    all_models: list[dict] = []
-    seen = set()
-    for m in hf_models + extra_models:
-        mid = m["model_id"]
-        if mid in seen:
-            continue
-        seen.add(mid)
-        all_models.append(m)
+    all_models = _scan_extra_models("/models/extra")
 
     # Group by role
     by_role: dict[str, list] = {}

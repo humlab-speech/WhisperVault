@@ -36,22 +36,6 @@ IMAGE_NAME = "whisperx-local"
 CONTAINER_SOCKET = "/run/api/whisperx.sock"
 DEFAULT_SOCKET_DIR = os.environ.get("WHISPERX_SOCKET_DIR", "/tmp/whisperx-api")
 DEFAULT_MODELS_DIR = os.path.join(os.getcwd(), "models")
-_LOCAL_HF_CACHE = os.path.join(os.getcwd(), "models", "hf")
-_SYSTEM_HF_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
-
-
-def _default_hf_cache() -> str:
-    """Prefer ./models/hf (portable self-contained copy) over the system cache.
-
-    Falls back to ~/.cache/huggingface/hub if the local directory is absent
-    or empty so the dev workflow without a local copy keeps working.
-    """
-    if os.path.isdir(_LOCAL_HF_CACHE) and any(os.scandir(_LOCAL_HF_CACHE)):
-        return _LOCAL_HF_CACHE
-    return _SYSTEM_HF_CACHE
-
-
-DEFAULT_HF_CACHE = _default_hf_cache()
 
 NGINX_CONTAINER_NAME = "whisperx-nginx"
 
@@ -218,23 +202,6 @@ def cmd_start(args) -> int:
     if not os.path.isdir(models_dir):
         print(f"warning: models directory '{models_dir}' does not exist – container may fail to find models")
 
-    hf_cache_dir = os.path.abspath(args.hf_cache_dir)
-    # always ensure directory exists; we mount it read-only, so an empty
-    # directory is harmless.  this avoids podman complaining when the path is
-    # absent (see user report).
-    try:
-        os.makedirs(hf_cache_dir, exist_ok=True)
-    except Exception as exc:
-        print(
-            f"warning: could not create HF cache directory '{hf_cache_dir}': {exc}",
-            file=sys.stderr,
-        )
-    if not os.path.isdir(hf_cache_dir):
-        print(
-            f"warning: HF cache directory '{hf_cache_dir}' is not a directory –" " container may fail to find models",
-            file=sys.stderr,
-        )
-
     # Resolve model aliases → container-side absolute paths
     if getattr(args, "list_models", False):
         _print_aliases(models_dir)
@@ -299,16 +266,9 @@ def cmd_start(args) -> int:
         # UDS socket directory (server creates the .sock file inside here)
         "-v",
         f"{socket_dir}:{os.path.dirname(CONTAINER_SOCKET)}:z",
-        # HF hub model cache – read-only (the main model weights live here)
-        "-v",
-        f"{hf_cache_dir}:/models/hf:ro",
-        # extra models dir for torch cache, alignment models, etc. – read-only
+        # all models live here as plain directories – read-only
         "-v",
         f"{models_dir}:/models/extra:ro",
-        "-e",
-        "HF_HOME=/models/hf",
-        "-e",
-        "HF_HUB_CACHE=/models/hf",
         "-e",
         "TORCH_HOME=/models/extra/cache/torch",
     ]
@@ -711,17 +671,6 @@ def main() -> None:
         dest="models_dir",
         default=DEFAULT_MODELS_DIR,
         help="Host path to the models directory (torch cache, alignment models; mounted read-only)",
-    )
-    p_start.add_argument(
-        "--hf-cache-dir",
-        dest="hf_cache_dir",
-        default=DEFAULT_HF_CACHE,
-        help=(
-            "Host path to the HuggingFace hub cache. "
-            "Always defaults to ./models/hf (no global cache is mounted). "
-            "Use this argument to override, e.g. when pre-populating a custom "
-            "cache directory."
-        ),
     )
     p_start.add_argument(
         "--hf-token", dest="hf_token", default=None, help="HuggingFace token (falls back to $HF_TOKEN)"
