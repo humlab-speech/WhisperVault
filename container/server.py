@@ -304,10 +304,17 @@ def _unload_models() -> None:
 def _get_align_model(language: str, cfg: ModelConfig):
     if language not in _align_models:
         logger.info("Loading alignment model for '%s' …", language)
+        # Only use the configured align_model override when the requested
+        # language matches the server's configured language.  For any other
+        # language we pass model_name=None so whisperx picks the correct
+        # built-in default (e.g. torchaudio WAV2VEC2_ASR_BASE_960H for 'en').
+        model_name = cfg.align_model if language == cfg.language else None
+        if model_name is not None:
+            logger.info("  using configured align_model override: %s", model_name)
         m, meta = load_align_model(
             language,
             cfg.device,
-            model_name=cfg.align_model,
+            model_name=model_name,
             model_dir=cfg.model_dir,
             model_cache_only=True,
         )
