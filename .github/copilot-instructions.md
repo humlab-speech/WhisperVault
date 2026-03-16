@@ -37,7 +37,7 @@ transcribe.py            standalone CLI client (only dep: httpx)
 models/                  project-local model cache  [git-ignored]
 output/                  transcription output files [git-ignored]
 input/                   audio input files          [git-ignored]
-whisperx/                whisperx Python package    [git-ignored, separate git repo]
+whisperx/                whisperx Python package    [git submodule — pinned commit]
 ```
 
 ---
@@ -106,6 +106,10 @@ whisperx/                whisperx Python package    [git-ignored, separate git r
   - **transcribe params**: evaluated per request, no reload needed
 - Some fields (`language`, `batch_size`, `chunk_size`) exist in both — reload sets the
   server default, transcribe overrides for one request only
+- **Idle unload**: `_idle_watcher` background task unloads models after `idle_timeout` seconds
+  of inactivity (default 120s, `WHISPERX_IDLE_TIMEOUT_SECONDS`, 0 = disabled).  The next
+  `/transcribe` auto-reloads from the saved `_config` transparently before proceeding.
+  `/health` exposes `idle_unloaded` and `idle_timeout_seconds`.
 
 ---
 

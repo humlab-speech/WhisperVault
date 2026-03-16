@@ -47,6 +47,10 @@ WHISPERX_VAD_METHOD          pyannote | silero           (pyannote)
 WHISPERX_VAD_ONSET           float                       (0.500)
 WHISPERX_VAD_OFFSET          float                       (0.363)
 WHISPERX_CHUNK_SIZE          int                         (30)
+WHISPERX_IDLE_TIMEOUT_SECONDS  int  (120, 0 = disabled) – seconds of inactivity before
+                                   models are unloaded to free memory.  The next
+                                   /transcribe request will auto-reload from the saved
+                                   config before proceeding.
 OFFLINE                      1 | 0  – enforce HF offline mode  (1)
 """
 
@@ -79,7 +83,7 @@ os.environ.setdefault("TORCH_HOME", "/models/extra/cache/torch")
 if os.environ.get("OFFLINE", "1") != "0":
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -178,6 +182,8 @@ class ModelConfig:
     vad_onset: float = field(default_factory=lambda: _env_float("WHISPERX_VAD_ONSET", 0.500))
     vad_offset: float = field(default_factory=lambda: _env_float("WHISPERX_VAD_OFFSET", 0.363))
     chunk_size: int = field(default_factory=lambda: _env_int("WHISPERX_CHUNK_SIZE", 30))
+    # ── idle unload ─────────────────────────────────────────────────────────
+    idle_timeout: int = field(default_factory=lambda: _env_int("WHISPERX_IDLE_TIMEOUT_SECONDS", 120))
 
 
 # ── server state ──────────────────────────────────────────────────────────────
@@ -188,6 +194,9 @@ _align_models: dict[str, tuple] = {}  # language → (model, metadata)
 _diarize_pipelines: dict[str, Any] = {}  # model_name → DiarizationPipeline
 _ready: bool = False
 _reloading: bool = False
+_idle_unloaded: bool = False  # True when models were freed due to idle timeout
+_last_activity: float = 0.0  # epoch seconds of the last completed /transcribe request
+_idle_watcher_task: Optional[asyncio.Task] = None
 _lock = asyncio.Lock()
 
 
@@ -318,6 +327,50 @@ def _get_diarize_pipeline(model_name: str, cfg: ModelConfig):
     return _diarize_pipelines[model_name]
 
 
+# ── idle unload watcher ──────────────────────────────────────────────────────
+
+
+async def _idle_watcher() -> None:
+    """Background task: unload models after a configurable idle period.
+
+    Checks every 15 seconds.  When the elapsed time since the last completed
+    /transcribe request exceeds ``_config.idle_timeout`` the models are freed
+    and ``_idle_unloaded`` is set to True.  The next /transcribe call will
+    auto-reload from the saved ``_config`` before proceeding.
+
+    Set ``WHISPERX_IDLE_TIMEOUT_SECONDS=0`` to disable.
+    """
+    global _idle_unloaded
+    while True:
+        await asyncio.sleep(15)
+        # Skip if no config yet, already unloaded, reloading, or timeout disabled
+        if _config is None or _idle_unloaded or _reloading or not _ready:
+            continue
+        if _config.idle_timeout <= 0:
+            continue
+        elapsed = time.time() - _last_activity
+        if elapsed < _config.idle_timeout:
+            continue
+        # Don't interrupt an active transcription
+        if _lock.locked():
+            continue
+        async with _lock:
+            # Re-check under lock — state may have changed while we waited
+            if _idle_unloaded or _reloading or not _ready:
+                continue
+            if _config is None or _config.idle_timeout <= 0:
+                continue
+            if time.time() - _last_activity < _config.idle_timeout:
+                continue
+            logger.info(
+                "Idle for %.0fs (timeout=%ds) — unloading models to free memory",
+                time.time() - _last_activity,
+                _config.idle_timeout,
+            )
+            _unload_models()  # keeps _config intact
+            _idle_unloaded = True
+
+
 # ── output formatting ─────────────────────────────────────────────────────────
 
 
@@ -356,8 +409,15 @@ def _format_outputs(result: dict, formats: list[str], writer_args: dict) -> dict
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _idle_watcher_task, _last_activity
+    _last_activity = time.time()
     _load_models(ModelConfig())
+    _idle_watcher_task = asyncio.create_task(_idle_watcher())
     yield
+    if _idle_watcher_task is not None:
+        _idle_watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _idle_watcher_task
     _unload_models()
 
 
@@ -369,6 +429,8 @@ async def health():
     return {
         "ready": _ready,
         "reloading": _reloading,
+        "idle_unloaded": _idle_unloaded,
+        "idle_timeout_seconds": _config.idle_timeout if _config else None,
         "model": _config.model if _config else None,
         "device": _config.device if _config else None,
         "compute_type": _config.compute_type if _config else None,
@@ -883,6 +945,12 @@ def _model_config_schema() -> dict:
             "description": "Default VAD chunk length in seconds. "
             "Can also be overridden per-request without a reload.",
         },
+        "idle_timeout": {
+            "env": "WHISPERX_IDLE_TIMEOUT_SECONDS",
+            "description": "Seconds of inactivity after which models are unloaded to free memory. "
+            "0 disables idle unload.  The next /transcribe request will auto-reload "
+            "from the saved config before proceeding.",
+        },
     }
 
     schema: dict = {}
@@ -975,7 +1043,7 @@ async def reload_models(body: dict):
     do NOT require a reload.  Reload is only needed for params baked into
     the ASR model at load time (model name, beam_size, vad_method, etc.)
     """
-    global _reloading
+    global _reloading, _idle_unloaded, _last_activity
     if _reloading:
         raise HTTPException(503, "Already reloading, please wait")
     async with _lock:
@@ -1005,6 +1073,9 @@ async def reload_models(body: dict):
             raise HTTPException(500, f"Reload failed: {exc}") from exc
         finally:
             _reloading = False
+        # Reset idle state — a successful (or restored) reload means a model is ready
+        _idle_unloaded = False
+        _last_activity = time.time()
     return {
         "status": "reloaded",
         "model": _config.model,
@@ -1056,9 +1127,10 @@ async def transcribe(
       "outputs": { "srt": "...", "txt": "...", ... }
     }
     """
+    global _idle_unloaded, _last_activity
     if _reloading:
         raise HTTPException(503, "Server is reloading models – try again shortly")
-    if not _ready:
+    if not _ready and not _idle_unloaded:
         raise HTTPException(503, "Models not ready")
 
     try:
@@ -1067,6 +1139,20 @@ async def transcribe(
         raise HTTPException(422, f"Invalid JSON in params: {exc}") from exc
 
     async with _lock:
+        # ── auto-reload after idle unload ────────────────────────────────────
+        if _idle_unloaded:
+            if _config is None:
+                raise HTTPException(503, "No model configuration available – use POST /reload first")
+            logger.info("Auto-reloading after idle unload (config unchanged) …")
+            try:
+                _load_models(_config)
+                _idle_unloaded = False
+            except Exception as exc:
+                logger.exception("Auto-reload after idle unload failed")
+                raise HTTPException(503, f"Auto-reload failed: {exc}") from exc
+        if not _ready:
+            raise HTTPException(503, "Models not ready")
+        _last_activity = time.time()
         cfg = _config
         work_dir = Path(tempfile.mkdtemp(prefix="whisperx_", dir="/tmp"))
         audio_suffix = Path(audio.filename or "audio.wav").suffix or ".wav"

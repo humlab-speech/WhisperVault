@@ -54,6 +54,88 @@ def _default_hf_cache() -> str:
 DEFAULT_HF_CACHE = _default_hf_cache()
 
 NGINX_CONTAINER_NAME = "whisperx-nginx"
+
+
+# ── model alias resolution ────────────────────────────────────────────────────
+
+
+def _build_alias_map(models_dir: str) -> dict[str, str]:
+    """Scan models_dir for subdirectories containing an 'alias' file.
+
+    Returns a dict mapping each alias → the container-side absolute path
+    of that model directory (i.e. under /models/extra/).
+
+    Example:
+        models/kb-whisper-large-ct2/alias  contains "kb-whisper-large"
+        → {"kb-whisper-large": "/models/extra/kb-whisper-large-ct2",
+           "kb-whisper-large-ct2": "/models/extra/kb-whisper-large-ct2"}
+
+    The directory basename itself is always included as an implicit alias.
+    """
+    alias_map: dict[str, str] = {}
+    root = Path(models_dir)
+    if not root.is_dir():
+        return alias_map
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        container_path = f"/models/extra/{entry.name}"
+        # directory basename is always a valid alias
+        alias_map[entry.name] = container_path
+        alias_file = entry / "alias"
+        if alias_file.is_file():
+            for line in alias_file.read_text().splitlines():
+                alias = line.strip()
+                if alias and not alias.startswith("#"):
+                    alias_map[alias] = container_path
+    return alias_map
+
+
+def _resolve_model(value: str | None, models_dir: str, label: str = "model") -> str | None:
+    """Resolve a model alias or bare directory name to a container path.
+
+    If *value* already looks like an absolute path or a HuggingFace model ID
+    (contains '/' or starts with '/') it is returned as-is.  Otherwise it is
+    looked up in the alias map built from *models_dir*.
+
+    Prints a warning and returns *value* unchanged if no alias matches
+    (the server will then try to use the value directly, which may fail).
+    """
+    if value is None:
+        return None
+    # Absolute path or HF model ID — pass through untouched
+    if value.startswith("/") or "/" in value:
+        return value
+    alias_map = _build_alias_map(models_dir)
+    if value in alias_map:
+        resolved = alias_map[value]
+        print(f"  alias '{value}' → {resolved}")
+        return resolved
+    print(
+        f"  warning: --{label} '{value}' is not an alias or absolute path — "
+        "passing to server as-is (may fail if not a valid HF model ID).",
+        file=sys.stderr,
+    )
+    return value
+
+
+def _print_aliases(models_dir: str) -> None:
+    """Print all available model aliases discovered in models_dir."""
+    alias_map = _build_alias_map(models_dir)
+    if not alias_map:
+        print(f"No models found in {models_dir}")
+        return
+    # Group by container path so each model is shown once
+    by_path: dict[str, list[str]] = {}
+    for alias, path in sorted(alias_map.items()):
+        by_path.setdefault(path, []).append(alias)
+    print(f"Available model aliases (from {models_dir}):")
+    for path, aliases in sorted(by_path.items()):
+        print(f"  {path}")
+        for a in aliases:
+            print(f"    --model {a}")
+
+
 NGINX_IMAGE_NAME = "whisperx-nginx"
 # Resolve once at import time so subcommand functions can use it
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -126,6 +208,14 @@ def cmd_start(args) -> int:
             f"warning: HF cache directory '{hf_cache_dir}' is not a directory –" " container may fail to find models",
             file=sys.stderr,
         )
+
+    # Resolve model aliases → container-side absolute paths
+    if getattr(args, "list_models", False):
+        _print_aliases(models_dir)
+        return 0
+    args.model = _resolve_model(args.model, models_dir, "model")
+    args.align_model = _resolve_model(args.align_model, models_dir, "align-model")
+    args.diarize_model = _resolve_model(args.diarize_model, models_dir, "diarize-model")
 
     # Mapping: argparse attribute → container env var
     env_map = {
@@ -273,6 +363,14 @@ def cmd_reload(args) -> int:
     Only pass the settings you want to change; omitted fields keep their
     current values.  Alignment and diarization caches are also cleared.
     """
+    models_dir = os.path.abspath(os.path.join(_PROJECT_ROOT, "models"))
+    if getattr(args, "list_models", False):
+        _print_aliases(models_dir)
+        return 0
+    args.model = _resolve_model(args.model, models_dir, "model")
+    args.align_model = _resolve_model(getattr(args, "align_model", None), models_dir, "align-model")
+    args.diarize_model = _resolve_model(getattr(args, "diarize_model", None), models_dir, "diarize-model")
+
     payload: dict = {}
     for attr in (
         "model",
@@ -292,6 +390,8 @@ def cmd_reload(args) -> int:
         "no_repeat_ngram_size",
         "initial_prompt",
         "hotwords",
+        "align_model",
+        "diarize_model",
     ):
         val = getattr(args, attr, None)
         if val is not None:
@@ -599,6 +699,13 @@ def main() -> None:
     )
     p_start.add_argument(
         "--hf-token", dest="hf_token", default=None, help="HuggingFace token (falls back to $HF_TOKEN)"
+    )
+    p_start.add_argument(
+        "--list-models",
+        dest="list_models",
+        action="store_true",
+        default=False,
+        help="List available model aliases from the models directory and exit",
     )
     p_start.add_argument(
         "--gpus",

@@ -14,3 +14,6 @@ output/
 # local notes - not version controlled
 docs/
 *.srt
+
+# local startup script - machine-specific, not version controlled
+start.sh
