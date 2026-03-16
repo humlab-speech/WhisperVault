@@ -443,91 +443,43 @@ async def health():
 
 # ── model inventory (used by /models) ────────────────────────────────────────
 
-# Static metadata for models that may be present in the caches.
-# Keys are HuggingFace model IDs exactly as you would pass to --model.
-# role:
-#   "asr"         – can be passed as the 'model' field to /reload or manage.py start
-#   "alignment"   – used automatically by whisperx for forced word alignment
-#   "diarization" – can be passed as 'diarize_model' in /transcribe params
-#   "vad"         – used internally by the VAD pipeline (not user-selectable directly)
-#   "embedding"   – used internally by the diarization pipeline
-_MODEL_METADATA: dict[str, dict] = {
-    # ── ASR models ──────────────────────────────────────────────────────────
-    "KBLab/kb-whisper-large": {
-        "role": "asr",
-        "architecture": "faster-whisper",
-        "languages": ["sv"],
-        "description": (
-            "Swedish-optimised Whisper large model fine-tuned by KBLab (National Library "
-            "of Sweden).  Best accuracy for Swedish speech.  Use compute_type=float32 on "
-            "CPU or float16 on GPU."
-        ),
-    },
-    "openai/whisper-large-v2": {
-        "role": "asr",
-        "architecture": "faster-whisper",
-        "languages": ["multilingual"],
-        "description": (
-            "OpenAI Whisper large-v2.  Strong general multilingual model.  "
-            "Use Systran/faster-whisper-large-v2 if you have that cached instead."
-        ),
-    },
-    "openai/whisper-large-v3": {
-        "role": "asr",
-        "architecture": "faster-whisper",
-        "languages": ["multilingual"],
-        "description": "OpenAI Whisper large-v3.  Latest general multilingual model from OpenAI.",
-    },
-    "openai/whisper-tiny": {
-        "role": "asr",
-        "architecture": "faster-whisper",
-        "languages": ["multilingual"],
-        "description": "Whisper tiny — extremely fast but low accuracy.  Useful for testing.",
-    },
-    "Systran/faster-whisper-small": {
-        "role": "asr",
-        "architecture": "faster-whisper",
-        "languages": ["multilingual"],
-        "description": (
-            "Faster-whisper small model in CTranslate2 format.  " "Good balance of speed and accuracy for short clips."
-        ),
-    },
-    # ── alignment models ────────────────────────────────────────────────────
-    "KBLab/wav2vec2-large-voxrex-swedish": {
-        "role": "alignment",
-        "languages": ["sv"],
-        "description": (
-            "Swedish wav2vec2 model used for forced word-level alignment.  "
-            "Selected automatically when language='sv'."
-        ),
-    },
-    "viktor-enzell/wav2vec2-large-voxrex-swedish-4gram": {
-        "role": "alignment",
-        "languages": ["sv"],
-        "description": "Alternative Swedish wav2vec2 alignment model with 4-gram LM.",
-    },
-    # ── diarization / VAD ───────────────────────────────────────────────────
-    "pyannote/speaker-diarization-community-1": {
-        "role": "diarization",
-        "description": (
-            "Pyannote community diarization pipeline.  Pass as 'diarize_model' in "
-            "/transcribe params, or use the default by setting diarize=true."
-        ),
-    },
-    "pyannote/segmentation": {
-        "role": "vad",
-        "description": (
-            "Pyannote segmentation model used as the VAD backbone when " "vad_method='pyannote' (the default)."
-        ),
-    },
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": {
-        "role": "embedding",
-        "description": (
-            "Multilingual sentence embedding model used by the pyannote diarization "
-            "pipeline for speaker representation."
-        ),
-    },
-}
+
+def _read_model_metadata(model_dir: Path) -> dict:
+    """Read structured metadata from an 'alias' file inside a model directory.
+
+    Supported comment directives (lines starting with '# key: value'):
+        role         asr | alignment | diarization | vad | embedding
+        language     ISO-639-1 code or 'multilingual' (repeatable)
+        description  human-readable description
+
+    Returns an empty dict if no alias file is present.
+    """
+    meta: dict = {}
+    alias_file = model_dir / "alias"
+    if not alias_file.is_file():
+        return meta
+    languages: list[str] = []
+    for line in alias_file.read_text().splitlines():
+        line = line.strip()
+        if not line.startswith("#"):
+            continue
+        body = line[1:].strip()
+        if ":" not in body:
+            continue
+        key, _, value = body.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if not value:
+            continue
+        if key == "role":
+            meta["role"] = value
+        elif key in ("language", "languages"):
+            languages.append(value)
+        elif key == "description":
+            meta["description"] = value
+    if languages:
+        meta["languages"] = languages
+    return meta
 
 
 def _scan_hf_cache(hf_cache_dir: str) -> list[dict]:
@@ -537,10 +489,8 @@ def _scan_hf_cache(hf_cache_dir: str) -> list[dict]:
     Each entry:
       model_id      – the HF model ID (e.g. 'KBLab/kb-whisper-large')
       cache_path    – absolute path to the cache directory for this model
-      role          – from _MODEL_METADATA, or 'unknown' if not recognised
-      description   – from _MODEL_METADATA, or None
+      role          – always 'unknown' (HF cache entries have no alias file)
       loaded        – True if this model is currently loaded as the active ASR model
-      metadata      – any additional fields from _MODEL_METADATA
     """
     results = []
     try:
@@ -557,19 +507,12 @@ def _scan_hf_cache(hf_cache_dir: str) -> list[dict]:
             if len(parts) != 2:
                 continue
             model_id = f"{parts[0]}/{parts[1]}"
-            meta = _MODEL_METADATA.get(model_id, {})
             record: dict = {
                 "model_id": model_id,
                 "cache_path": str(entry),
-                "role": meta.get("role", "unknown"),
+                "role": "unknown",
                 "loaded": bool(_config and _config.model == model_id),
             }
-            if "description" in meta:
-                record["description"] = meta["description"]
-            if "languages" in meta:
-                record["languages"] = meta["languages"]
-            if "architecture" in meta:
-                record["architecture"] = meta["architecture"]
             results.append(record)
     except Exception as exc:
         logger.warning("Could not scan HF cache at %s: %s", hf_cache_dir, exc)
@@ -583,11 +526,9 @@ def _scan_extra_models(extra_dir: str) -> list[dict]:
     stored in the HF hub cache, e.g. CTranslate2 ASR models or other plain
     directories.
 
-    Each entry has the same structure as _scan_hf_cache, except the
-    "model_id" is simply the basename of the directory (the caller may add
-    extra context later).  If the basename exactly matches a key in
-    _MODEL_METADATA we copy the metadata; otherwise the record is marked
-    "unknown".
+    Each entry has the same structure as _scan_hf_cache.  Role, language and
+    description metadata are read dynamically from each directory's 'alias'
+    file (comment lines starting with '# role:', '# language:', '# description:').
     """
     results = []
     try:
@@ -597,13 +538,14 @@ def _scan_extra_models(extra_dir: str) -> list[dict]:
         for entry in sorted(root.iterdir()):
             if not entry.is_dir():
                 continue
+            # Skip non-model directories (e.g. cache/, hf/ symlink caches)
+            is_model_dir = any((entry / f).exists() for f in ("config.json", "config.yaml", "alias"))
+            if not is_model_dir:
+                continue
             name = entry.name
-            # intentionally keep the model_id/simple name so callers can see the
-            # actual directory layout; metadata lookup may add more info
-            model_id = name
-            meta = _MODEL_METADATA.get(model_id, {})
+            meta = _read_model_metadata(entry)
             record: dict = {
-                "model_id": model_id,
+                "model_id": name,
                 "cache_path": str(entry),
                 "role": meta.get("role", "unknown"),
                 "loaded": bool(_config and _config.model and _config.model.endswith(name)),
@@ -612,8 +554,6 @@ def _scan_extra_models(extra_dir: str) -> list[dict]:
                 record["description"] = meta["description"]
             if "languages" in meta:
                 record["languages"] = meta["languages"]
-            if "architecture" in meta:
-                record["architecture"] = meta["architecture"]
             results.append(record)
     except Exception as exc:
         logger.warning("Could not scan extra models at %s: %s", extra_dir, exc)

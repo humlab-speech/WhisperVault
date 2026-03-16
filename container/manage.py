@@ -79,15 +79,18 @@ def _build_alias_map(models_dir: str) -> dict[str, str]:
     for entry in sorted(root.iterdir()):
         if not entry.is_dir():
             continue
+        # Skip internal cache/hf directories — only include directories that
+        # contain an alias file (i.e. actual model directories).
+        alias_file = entry / "alias"
+        if not alias_file.is_file():
+            continue
         container_path = f"/models/extra/{entry.name}"
         # directory basename is always a valid alias
         alias_map[entry.name] = container_path
-        alias_file = entry / "alias"
-        if alias_file.is_file():
-            for line in alias_file.read_text().splitlines():
-                alias = line.strip()
-                if alias and not alias.startswith("#"):
-                    alias_map[alias] = container_path
+        for line in alias_file.read_text().splitlines():
+            alias = line.strip()
+            if alias and not alias.startswith("#"):
+                alias_map[alias] = container_path
     return alias_map
 
 
@@ -125,13 +128,36 @@ def _print_aliases(models_dir: str) -> None:
     if not alias_map:
         print(f"No models found in {models_dir}")
         return
+    root = Path(models_dir)
     # Group by container path so each model is shown once
     by_path: dict[str, list[str]] = {}
     for alias, path in sorted(alias_map.items()):
         by_path.setdefault(path, []).append(alias)
     print(f"Available model aliases (from {models_dir}):")
     for path, aliases in sorted(by_path.items()):
-        print(f"  {path}")
+        # Parse role/language metadata from the alias file comments
+        dirname = path.rsplit("/", 1)[-1]
+        alias_file = root / dirname / "alias"
+        role = None
+        languages: list[str] = []
+        if alias_file.is_file():
+            for line in alias_file.read_text().splitlines():
+                line = line.strip()
+                if not line.startswith("#"):
+                    continue
+                body = line[1:].strip()
+                if ":" not in body:
+                    continue
+                key, _, value = body.partition(":")
+                key = key.strip().lower()
+                value = value.strip()
+                if key == "role" and value:
+                    role = value
+                elif key in ("language", "languages") and value:
+                    languages.append(value)
+        meta_parts = [p for p in ([role] + languages) if p]
+        header = path + (f"  [{' · '.join(meta_parts)}]" if meta_parts else "")
+        print(f"  {header}")
         for a in aliases:
             print(f"    --model {a}")
 
