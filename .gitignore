@@ -2,7 +2,7 @@
 # ignore its contents in the top-level git repo so we don't accidentally
 # commit the entire external project.  Remove this entry and add a
 # submodule if you prefer tracking it in the main repo.
-whisperx/
+# whisperx/
 
 demo/
 
@@ -10,4 +10,7 @@ demo/
 models/
 input/
 output/
+
+# local notes - not version controlled
+docs/
 *.srt
