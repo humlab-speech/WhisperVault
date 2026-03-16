@@ -272,6 +272,15 @@ def cmd_start(args) -> int:
         "-e",
         "TORCH_HOME=/models/extra/cache/torch",
     ]
+    if getattr(args, "dev", False):
+        # Mount the host-side Python scripts directly into the container so
+        # edits take effect on the next restart without a full image rebuild.
+        container_dir = os.path.join(_PROJECT_ROOT, "container")
+        for script in ("server.py", "client.py"):
+            host_path = os.path.join(container_dir, script)
+            if os.path.isfile(host_path):
+                podman_cmd += ["-v", f"{host_path}:/app/container/{script}:ro,z"]
+        print("  [dev] mounting host container/*.py over image copies")
     podman_cmd = podman_cmd + env_args + [IMAGE_NAME]
 
     print(f"Starting container '{CONTAINER_NAME}' from image '{IMAGE_NAME}' …")
@@ -671,6 +680,13 @@ def main() -> None:
         dest="models_dir",
         default=DEFAULT_MODELS_DIR,
         help="Host path to the models directory (torch cache, alignment models; mounted read-only)",
+    )
+    p_start.add_argument(
+        "--dev",
+        action="store_true",
+        default=False,
+        help="Mount host container/server.py and container/client.py into the container at startup "
+        "so code changes take effect on restart without rebuilding the image.",
     )
     p_start.add_argument(
         "--hf-token", dest="hf_token", default=None, help="HuggingFace token (falls back to $HF_TOKEN)"

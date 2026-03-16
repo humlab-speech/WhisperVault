@@ -305,13 +305,9 @@ def _unload_models() -> None:
 def _get_align_model(language: str, cfg: ModelConfig):
     if language not in _align_models:
         logger.info("Loading alignment model for '%s' …", language)
-        # Only use the configured align_model override when the requested
-        # language matches the server's configured language.  For any other
-        # language we pass model_name=None so whisperx picks the correct
-        # built-in default (e.g. torchaudio WAV2VEC2_ASR_BASE_960H for 'en').
-        model_name = cfg.align_model if language == cfg.language else None
+        model_name = _resolve_align_model_override(language, cfg.align_model)
         if model_name is not None:
-            logger.info("  using configured align_model override: %s", model_name)
+            logger.info("  using align_model override: %s", model_name)
         m, meta = load_align_model(
             language,
             cfg.device,
@@ -321,6 +317,36 @@ def _get_align_model(language: str, cfg: ModelConfig):
         )
         _align_models[language] = (m, meta)
     return _align_models[language]
+
+
+def _resolve_align_model_override(language: str, align_model: Optional[str]) -> Optional[str]:
+    """Return the align_model override to use for *language*, or None to auto-select.
+
+    For local paths (starts with '/') we read the model's alias file and only
+    apply the override when the model explicitly declares support for *language*
+    via a '# language: ...' comment.  This prevents a Swedish model from being
+    used for English transcriptions just because cfg.align_model happens to be set.
+
+    For HuggingFace model IDs (no leading '/') we trust the operator chose the
+    right model and return it as-is.
+    """
+    if not align_model:
+        return None
+    if not align_model.startswith("/"):
+        # HF model ID — operator explicitly chose it, pass through unchanged
+        return align_model
+    # Local path — check alias file for declared language support
+    meta = _read_model_metadata(Path(align_model))
+    declared = meta.get("languages", [])
+    if language in declared:
+        return align_model
+    logger.debug(
+        "align_model '%s' declares languages %s — skipping for '%s', using auto-select",
+        align_model,
+        declared,
+        language,
+    )
+    return None
 
 
 def _get_diarize_pipeline(model_name: str, cfg: ModelConfig):
