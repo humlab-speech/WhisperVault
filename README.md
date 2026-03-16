@@ -230,7 +230,9 @@ WhisperVault/
 └── CLAUDE.md                   Symlink → .github/copilot-instructions.md (agent instructions)
 ```
 
-> `models/`, `input/`, `output/`, and `whisperx/` are excluded from git via `.gitignore`.
+> `models/`, `input/`, and `output/` are excluded from git via `.gitignore`.
+> `whisperx/` is tracked as a **git submodule**; after cloning you must run:
+> `git submodule update --init --recursive`
 
 ---
 
@@ -322,7 +324,7 @@ HuggingFace blob caches.
 | What | In git? | How to get it |
 |---|---|---|
 | Repository code | ✅ | `git clone` |
-| `whisperx/` package source | ❌ | `git clone https://github.com/m-bain/whisperX` into `whisperx/` |
+| `whisperx/` package source | ✅ | `git clone --recurse-submodules <repo-url>` (or `git submodule update --init --recursive`) |
 | `models/` (all model weights) | ❌ | Copy from existing machine **or** re-download (see above) |
 | `.venv/` (host-side Python venv) | ❌ | Recreate: `python -m venv .venv && pip install httpx pre-commit` |
 | Container images | ❌ | Rebuild: `podman build -t whisperx-local -f container/Containerfile .` |
@@ -350,10 +352,11 @@ python container/manage.py start \
 
 ```bash
 # 1. Clone the repo
-git clone <repo-url> WhisperVault && cd WhisperVault
+# (Note: this repo uses a git submodule for whisperx)
+git clone --recurse-submodules <repo-url> WhisperVault && cd WhisperVault
 
-# 2. Get the whisperx package
-git clone https://github.com/m-bain/whisperX whisperx
+# 2. (If you cloned without --recurse-submodules)
+git submodule update --init --recursive
 
 # 3. Copy models from an existing machine (rsync, scp, USB drive, etc.)
 rsync -a user@source:/path/to/WhisperVault/models/ models/
@@ -444,6 +447,10 @@ location /whisperx/ {
     client_max_body_size 2G;
 }
 ```
+
+> **Note:** Transcriptions can take a long time for lengthy audio files, so you may need
+> to increase your reverse-proxy request timeout (`proxy_read_timeout` in nginx) to avoid
+> premature connection closes. `3600s` (60 minutes) is a reasonable starting point.
 
 For Caddy:
 ```
