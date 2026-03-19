@@ -310,14 +310,18 @@ def cmd_start(args) -> int:
         print(".", end="", flush=True)
         if Path(sock).exists():
             health = _call_health(socket_dir)
-            if health and health.get("ready"):
-                print(" ready!")
-                print(
-                    f"  model   : {health.get('model')}\n"
-                    f"  device  : {health.get('device')} ({health.get('compute_type')})\n"
-                    f"  language: {health.get('language') or 'auto-detect'}"
-                )
-                return 0
+            # Server is ready if:
+            # 1. A model is loaded (ready=true), OR
+            # 2. Socket exists and server is responding (even without a model, which is valid)
+            if health:
+                if health.get("ready") or not health.get("model"):
+                    print(" ready!")
+                    print(
+                        f"  model   : {health.get('model') or 'none (use POST /reload to load)'}\n"
+                        f"  device  : {health.get('device')} ({health.get('compute_type')})\n"
+                        f"  language: {health.get('language') or 'auto-detect'}"
+                    )
+                    return 0
     print(
         "\ntimeout – server did not become ready.\n" f"Check logs with:  podman logs {CONTAINER_NAME}",
         file=sys.stderr,
