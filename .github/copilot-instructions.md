@@ -229,7 +229,12 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/models
 ---
 
 ## Testing a change
-After editing `server.py` or `container/Containerfile`, rebuild and restart:
+For quick iteration while editing `container/server.py` or `container/manage.py`, start the container in **dev mode** so the host scripts are mounted straight into the container (no rebuild required):
+```bash
+python container/manage.py start --dev \
+    --model /models/extra/kb-whisper-large-ct2 --device cpu --compute-type float32 --language sv
+```You can also start without a model (`--model` is optional) and load one later via `POST /reload`.
+Once the change works, rebuild the image and start without `--dev` to ensure you’re running the baked-in code:
 ```bash
 podman build -t whisperx-local -f container/Containerfile . && \
 python container/manage.py start \

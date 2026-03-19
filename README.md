@@ -184,6 +184,14 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/reload \
     -H 'Content-Type: application/json' \
     -d '{"model": "/models/extra/faster-whisper-large-v3-ct2"}'
+
+Idle unload and health endpoint
+
+The server may automatically unload models after a period of inactivity to free memory. When
+that happens the `/health` endpoint reflects the state (it includes `idle_unloaded: true` and
+`idle_timeout_seconds`) and the next `/transcribe` request (or an explicit `POST /reload`) will
+transparently reload the configured model before processing. You can change the idle timeout
+via the reload parameters (or `manage.py reload`) if you need models to stay resident longer.
 ```
 
 ### 6 — Stop
@@ -409,6 +417,8 @@ python container/manage.py start \
     --language sv
 ```
 
+The `--model` flag is optional; if omitted, the container starts without an ASR model loaded and you can later load one via `POST /reload`.
+
 This runs the container with:
 - `--network=none` — zero network access
 - `--cap-drop=ALL` — no Linux capabilities
@@ -421,6 +431,42 @@ loaded model, so there is no startup overhead per transcription.
 
 The `manage.py start` command polls the socket until the model finishes loading (up to 3 minutes)
 and prints a ready confirmation.
+
+### Development mode (`--dev`)
+
+`manage.py` supports a development mode that bind-mounts selected host source files over the
+copies baked into the container image. Use `--dev` while actively editing `container/` scripts so you
+can iterate without rebuilding the image on every change. In this mode the host files (for example
+`container/server.py` and `container/client.py`) are mounted into the running container and take
+precedence over the image contents.
+
+Example workflow:
+
+```bash
+# Start with dev mounts (fast edit/reload cycle):
+python container/manage.py start --dev \
+    --model /models/extra/faster-whisper-large-v3-ct2 \
+    --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cpu --compute-type float32 --language en
+
+# Edit files under container/ on the host, then stop and restart the container to pick up
+# changes to modules that import at process start. Use --replace to stop the previous instance.
+python container/manage.py stop
+
+# When you're satisfied with changes, rebuild the image to bake them into the container:
+podman build -t whisperx-local -f container/Containerfile .
+
+# Start normally (no --dev) to run the baked image in production
+python container/manage.py start \
+    --model /models/extra/faster-whisper-large-v3-ct2 --diarize-model /models/extra/pyannote-speaker-diarization \
+    --device cpu --compute-type float32 --language en
+```
+
+Notes:
+- `--dev` is intended for local development only; it intentionally breaks image immutability so
+  avoid using it in production.
+- After rebuilding the image, always start without `--dev` to ensure the container runs the
+  baked-in files instead of bind-mounted host copies.
 
 ### nginx sidecar
 

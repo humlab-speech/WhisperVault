@@ -17,3 +17,7 @@ docs/
 
 # local startup script - machine-specific, not version controlled
 start.sh
+
+# Python cache directories
+__pycache__/
+*.pyc

@@ -86,7 +86,7 @@ if os.environ.get("OFFLINE", "1") != "0":
 
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from whisperx.alignment import align, load_align_model
@@ -146,7 +146,9 @@ def _env_opt_str(key: str) -> Optional[str]:
 @dataclass
 class ModelConfig:
     # ── model identity ──────────────────────────────────────────────────────
-    model: str = field(default_factory=lambda: os.environ.get("WHISPERX_MODEL", "small"))
+    # If unset (None), the server starts without a model loaded and waits for
+    # an explicit POST /reload to load one.
+    model: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_MODEL"))
     device: str = field(default_factory=lambda: os.environ.get("WHISPERX_DEVICE", "cpu"))
     device_index: int = field(default_factory=lambda: _env_int("WHISPERX_DEVICE_INDEX", 0))
     compute_type: str = field(default_factory=lambda: os.environ.get("WHISPERX_COMPUTE_TYPE", "default"))
@@ -189,6 +191,10 @@ class ModelConfig:
 
 # ── server state ──────────────────────────────────────────────────────────────
 
+# Maximum audio upload size accepted by /transcribe. FastAPI/Starlette will
+# buffer uploads in memory (or disk) which can be exploited if unbounded.
+_MAX_AUDIO_BYTES = 1_000_000_000  # 1 GiB
+
 _config: Optional[ModelConfig] = None
 _asr_model: Any = None
 _align_models: dict[str, tuple] = {}  # language → (model, metadata)
@@ -197,6 +203,7 @@ _ready: bool = False
 _reloading: bool = False
 _idle_unloaded: bool = False  # True when models were freed due to idle timeout
 _last_activity: float = 0.0  # epoch seconds of the last completed /transcribe request
+_transcribing: bool = False  # True while a /transcribe request is actively processing
 _idle_watcher_task: Optional[asyncio.Task] = None
 _lock = asyncio.Lock()
 
@@ -231,6 +238,15 @@ def _build_asr_options(cfg: ModelConfig) -> dict:
 
 def _load_models(cfg: ModelConfig) -> None:
     global _config, _asr_model, _align_models, _diarize_pipelines, _ready
+
+    # Allow starting without a model; the server is then not ready until a
+    # successful POST /reload loads one.
+    if not cfg.model:
+        _config = cfg
+        _ready = False
+        logger.info("No model configured at startup; waiting for POST /reload")
+        return
+
     if cfg.threads > 0:
         torch.set_num_threads(cfg.threads)
 
@@ -373,6 +389,8 @@ async def _idle_watcher() -> None:
     auto-reload from the saved ``_config`` before proceeding.
 
     Set ``WHISPERX_IDLE_TIMEOUT_SECONDS=0`` to disable.
+
+    TODO: Ensure a long-running /transcribe request cannot be treated as idle.
     """
     global _idle_unloaded
     while True:
@@ -385,8 +403,10 @@ async def _idle_watcher() -> None:
         elapsed = time.time() - _last_activity
         if elapsed < _config.idle_timeout:
             continue
-        # Don't interrupt an active transcription
-        if _lock.locked():
+        # Don't interrupt an active transcription (esp. if it runs longer than the
+        # configured idle timeout).  The `_transcribing` flag avoids rare races where
+        # the lock is briefly released between the watcher check and the lock acquire.
+        if _transcribing or _lock.locked():
             continue
         async with _lock:
             # Re-check under lock — state may have changed while we waited
@@ -423,6 +443,27 @@ def _to_python(obj):
     return obj
 
 
+async def _save_upload_to_file(audio: UploadFile, dest: Path) -> None:
+    """Save an UploadFile to disk while enforcing a maximum upload size.
+
+    This reads the upload into memory (up to _MAX_AUDIO_BYTES) before writing to
+    disk. That makes it safe to reject oversized uploads early and ensures we
+    never use more than ~1GiB of memory for a single upload.
+    """
+    total = 0
+    data = bytearray()
+    while True:
+        chunk = await audio.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_AUDIO_BYTES:
+            raise HTTPException(413, f"Audio file too large (max {_MAX_AUDIO_BYTES} bytes)")
+        data.extend(chunk)
+
+    dest.write_bytes(data)
+
+
 def _format_outputs(result: dict, formats: list[str], writer_args: dict) -> dict[str, str]:
     """Render whisperx result dict into text for each requested format."""
     outputs: dict[str, str] = {}
@@ -443,9 +484,14 @@ def _format_outputs(result: dict, formats: list[str], writer_args: dict) -> dict
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _idle_watcher_task, _last_activity
+    global _idle_watcher_task, _last_activity, _config
     _last_activity = time.time()
-    _load_models(ModelConfig())
+    _config = ModelConfig()
+    # If a starting model is configured, load it now; otherwise wait for /reload.
+    if _config.model:
+        _load_models(_config)
+    else:
+        logger.info("Starting without a model; use POST /reload to load one")
     _idle_watcher_task = asyncio.create_task(_idle_watcher())
     yield
     if _idle_watcher_task is not None:
@@ -1007,6 +1053,7 @@ async def reload_models(body: dict):
 
 @app.post("/transcribe")
 async def transcribe(
+    request: Request,
     audio: UploadFile = File(...),
     params: str = Form("{}"),
 ):
@@ -1048,11 +1095,24 @@ async def transcribe(
       "outputs": { "srt": "...", "txt": "...", ... }
     }
     """
-    global _idle_unloaded, _last_activity
+    global _idle_unloaded, _last_activity, _transcribing
     if _reloading:
         raise HTTPException(503, "Server is reloading models – try again shortly")
     if not _ready and not _idle_unloaded:
         raise HTTPException(503, "Models not ready")
+
+    # If the client advertises Content-Length, enforce it before we start receiving.
+    # This allows us to reject oversized uploads early (ideally before any buffering).
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > _MAX_AUDIO_BYTES:
+                raise HTTPException(413, f"Content-Length exceeds maximum allowed {_MAX_AUDIO_BYTES} bytes")
+        except ValueError:
+            pass
+
+    # Protect against abusive uploads; read the upload incrementally and cap at the
+    # configured maximum.  This ensures we never read more than _MAX_AUDIO_BYTES.
 
     try:
         p = json.loads(params)
@@ -1060,6 +1120,7 @@ async def transcribe(
         raise HTTPException(422, f"Invalid JSON in params: {exc}") from exc
 
     async with _lock:
+        _transcribing = True
         # ── auto-reload after idle unload ────────────────────────────────────
         if _idle_unloaded:
             if _config is None:
@@ -1081,8 +1142,7 @@ async def transcribe(
         t_start = time.time()
         try:
             # ── save uploaded audio ──────────────────────────────────────────
-            audio_bytes = await audio.read()
-            audio_path.write_bytes(audio_bytes)
+            await _save_upload_to_file(audio, audio_path)
 
             batch_size = p.get("batch_size", cfg.batch_size)
             chunk_size = p.get("chunk_size", cfg.chunk_size)
@@ -1186,6 +1246,7 @@ async def transcribe(
             logger.exception("Transcription failed")
             raise HTTPException(500, f"Transcription error: {exc}") from exc
         finally:
+            _transcribing = False
             shutil.rmtree(work_dir, ignore_errors=True)
 
 

@@ -231,6 +231,7 @@ def cmd_start(args) -> int:
         "diarize_model": "WHISPERX_DIARIZE_MODEL",
         "repetition_penalty": "WHISPERX_REPETITION_PENALTY",
         "no_repeat_ngram_size": "WHISPERX_NO_REPEAT_NGRAM",
+        "idle_timeout": "WHISPERX_IDLE_TIMEOUT_SECONDS",
     }
     env_args: list[str] = []
     for attr, env_name in env_map.items():
@@ -512,6 +513,13 @@ def _add_model_config_args(p: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Decoding repetition penalty (faster-whisper TranscriptionOptions.repetition_penalty).",
+    )
+    p.add_argument(
+        "--idle-timeout",
+        dest="idle_timeout",
+        type=int,
+        default=None,
+        help="Seconds of idle time after which models are unloaded (0 disables).",
     )
     p.add_argument(
         "--no-repeat-ngram-size",
