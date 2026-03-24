@@ -51,10 +51,11 @@ whisperx/                whisperx Python package    [git submodule — pinned co
 - Async FastAPI handlers; the asyncio lock `_lock` serialises model access
 
 ### Pre-commit
-- A host-side venv lives at project root (`./.venv`) — activate it before committing:
+- A host-side venv lives at project root (`./.venv`) — **activate it before every Python command**:
   ```bash
   source .venv/bin/activate
   ```
+- **ALL Python commands (including `manage.py`, `transcribe.py`, etc.) must be run with the venv activated.** Without activation, system Python is used and dependencies will not be found.
 - Agents (including Copilot) must always call `configure_python_environment` at the start of a session or before any Python-related operation; this ensures the correct venv is used.
 - If `pre-commit` is not yet installed in that venv:
   ```bash

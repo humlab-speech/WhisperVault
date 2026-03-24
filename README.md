@@ -408,6 +408,10 @@ python container/manage.py build-nginx   # builds only the nginx image
 ### Transcription container
 
 ```bash
+# Minimal startup (no model loaded at start)
+python container/manage.py start --device cpu
+
+# Or with model + alignment + diarization loaded at startup
 python container/manage.py start \
     --model /models/extra/kb-whisper-large-ct2 \
     --align-model /models/extra/wav2vec2-large-voxrex-swedish \
@@ -417,7 +421,7 @@ python container/manage.py start \
     --language sv
 ```
 
-The `--model` flag is optional; if omitted, the container starts without an ASR model loaded and you can later load one via `POST /reload`.
+**All model and language options are optional.** The server starts immediately without loading anything and waits for a `POST /reload` request to load models on demand. This enables fast startup with lazy model loading.
 
 This runs the container with:
 - `--network=none` — zero network access

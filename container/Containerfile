@@ -5,7 +5,7 @@ FROM python:3.12-slim
 
 # system dependencies required by whisperx
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ffmpeg && \
+    apt-get install -y --no-install-recommends git ffmpeg curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -24,6 +24,10 @@ RUN python -c "import nltk; nltk.download('punkt', download_dir='/usr/local/nltk
 
 # ensure scripts are executable
 RUN chmod +x /app/container/server.py /app/container/manage.py
+
+# OCI healthcheck probing our internal /health endpoint via UDS
+HEALTHCHECK --interval=10s --timeout=2s --start-period=15s --retries=3 \
+  CMD curl -f --unix-socket /run/api/whisperx.sock http://localhost/health || exit 1
 
 # server.py is the container entrypoint (listens on a Unix Domain Socket).
 # manage.py is the HOST-SIDE management script; it is also present inside
