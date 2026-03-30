@@ -516,6 +516,8 @@ async def health():
         "compute_type": _config.compute_type if _config else None,
         "language": _config.language if _config else None,
         "vad_method": _config.vad_method if _config else None,
+        "align_model": _config.align_model if _config else None,
+        "diarize_model": _config.diarize_model if _config else None,
         "align_models_cached": list(_align_models.keys()),
         "diarize_pipelines_cached": list(_diarize_pipelines.keys()),
     }
@@ -642,6 +644,82 @@ async def models():
             "diarization": list(_diarize_pipelines.keys()),
         },
     }
+
+
+# ── packages ─────────────────────────────────────────────────────────────────
+
+_PACKAGES_FILE = "/models/extra/packages.json"
+
+
+def _load_packages() -> dict:
+    """Load named model-bundle definitions from /models/extra/packages.json.
+
+    Returns an empty dict if the file is absent.  Raises ``ValueError`` on
+    JSON parse errors so callers can surface a helpful error message.
+
+    Each package entry may contain any subset of ModelConfig field names plus
+    an optional ``description`` key.  Example::
+
+        {
+          "sv-standard": {
+            "description": "Swedish — KB Whisper large + wav2vec2 + pyannote",
+            "model": "/models/extra/kb-whisper-large-ct2",
+            "align_model": "/models/extra/wav2vec2-large-voxrex-swedish",
+            "diarize_model": "/models/extra/pyannote-speaker-diarization",
+            "language": "sv",
+            "compute_type": "float32"
+          }
+        }
+    """
+    p = Path(_PACKAGES_FILE)
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Could not parse packages.json: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("packages.json must be a JSON object at the top level")
+    return data
+
+
+@app.get("/packages")
+async def packages():
+    """Return the model packages defined in /models/extra/packages.json.
+
+    Packages are named bundles of coordinated models (ASR + alignment +
+    diarization) that can be loaded atomically via POST /reload by passing
+    ``{"package": "<name>"}`` in the request body.  All other ModelConfig
+    fields can be added to the same body to override package defaults.
+
+    The file is re-read on every request so package definitions can be
+    updated without restarting the server.
+
+    Response
+    --------
+    packages
+        Dict mapping package name → definition.  A ``missing_paths`` list is
+        appended for any model paths that do not exist on disk (to help
+        diagnose misconfiguration before a reload is attempted).
+    """
+    try:
+        pkgs = _load_packages()
+    except ValueError as exc:
+        raise HTTPException(500, str(exc))
+
+    annotated: dict = {}
+    for name, defn in pkgs.items():
+        entry = dict(defn)
+        missing = [
+            path
+            for field in ("model", "align_model", "diarize_model")
+            if (path := defn.get(field)) and not Path(path).exists()
+        ]
+        if missing:
+            entry["missing_paths"] = missing
+        annotated[name] = entry
+
+    return {"packages": annotated}
 
 
 # ── parameter schema (static, used by /params) ────────────────────────────────
@@ -1018,6 +1096,19 @@ async def reload_models(body: dict):
         # Remember the current config so we can recover if the new load fails.
         saved_cfg = _config
         try:
+            # Expand a package shorthand to individual ModelConfig fields.
+            # Fields explicitly supplied in the body take precedence over package defaults.
+            if "package" in body:
+                package_name = body.pop("package")
+                try:
+                    pkgs = _load_packages()
+                except ValueError as exc:
+                    raise HTTPException(400, f"Could not load packages.json: {exc}")
+                if package_name not in pkgs:
+                    raise HTTPException(404, f"Unknown package '{package_name}'. Available: {list(pkgs)}")
+                pkg_fields = {k: v for k, v in pkgs[package_name].items() if k != "description"}
+                body = {**pkg_fields, **body}  # package defaults; caller's fields win
+
             # Start from current config, apply only the supplied overrides
             if _config is not None:
                 current = dataclasses.asdict(_config)
@@ -1048,6 +1139,9 @@ async def reload_models(body: dict):
         "model": _config.model,
         "device": _config.device,
         "compute_type": _config.compute_type,
+        "language": _config.language,
+        "align_model": _config.align_model,
+        "diarize_model": _config.diarize_model,
     }
 
 

@@ -38,6 +38,12 @@ models/                  project-local model cache  [git-ignored]
 output/                  transcription output files [git-ignored]
 input/                   audio input files          [git-ignored]
 whisperx/                whisperx Python package    [git submodule — pinned commit]
+
+whisper-script/          batch transcription client (separate repo, optional checkout)
+  run_whisper.py         converts audio + sends to WhisperVault over HTTP(S)
+  WhisperTranscriber/    httpx-based client for POST /transcribe and POST /reload
+  configurations/        JSON config files (model, language, VAD, diarize, etc.)
+  .env                   WHISPERX_ENDPOINT + optional basic auth  [git-ignored]
 ```
 
 ---
@@ -215,6 +221,48 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/models
 - Alignment (English): built into torchaudio (`wav2vec2_fairseq_base_ls960_asr_ls960.pth` in `models/cache/torch/`)
 - Diarization: `models/pyannote-speaker-diarization/` + `models/pyannote-segmentation/` + `models/paraphrase-multilingual-MiniLM-L12-v2/`
 - Device: `cpu`, compute_type: `float32`
+
+---
+
+## End-to-end testing with whisper-script
+
+If the `whisper-script/` directory is checked out in this workspace it is a
+separate HTTP client that mirrors what real users do: connect to WhisperVault
+over the nginx sidecar and run batch transcriptions.  Use it as an integration
+test whenever you change `server.py`, the API surface, or package definitions.
+
+**Prerequisites:**
+1. The server and nginx sidecar must be running:
+   ```bash
+   python container/manage.py start --dev --device cpu --compute-type float32
+   python container/manage.py start-nginx          # exposes :8088 on localhost
+   ```
+2. `python-dotenv` must be installed in the venv (the script needs it):
+   ```bash
+   pip install python-dotenv
+   ```
+3. A `.env` in `whisper-script/` pointing at the local sidecar (already in
+   `.gitignore`):
+   ```
+   WHISPERX_ENDPOINT=http://localhost:8088
+   ```
+
+**Running a test:**
+```bash
+# Create a throwaway project dir with an audio file
+mkdir -p /tmp/whisper-test/raw_audio
+cp demo/ZOOM0020_LR_3min.wav /tmp/whisper-test/raw_audio/
+
+# Run one Swedish config entry (uses the sv-standard package)
+cd whisper-script
+python run_whisper.py /tmp/whisper-test \
+    --configuration configurations/large_default_swedish.json \
+    --run-description "swedish_kb_whisper_large_ct2_with_vad_0.5"
+```
+
+This exercises the full path: audio conversion → HTTP reload (package
+resolution) → HTTP transcribe → output file writing.  Check
+`/tmp/whisper-test/transcriptions/` for the SRT/TXT results.
 
 ---
 
