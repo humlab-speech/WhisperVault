@@ -5,6 +5,7 @@
 # whisperx/
 
 demo/
+whisper-script/
 
 # data and generated outputs - not version controlled
 models/

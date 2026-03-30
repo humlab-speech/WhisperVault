@@ -86,10 +86,11 @@ if os.environ.get("OFFLINE", "1") != "0":
 
 from contextlib import asynccontextmanager, suppress
 
+import torchaudio
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from whisperx.alignment import align, load_align_model
+from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH, align, load_align_model
 from whisperx.asr import load_model as _load_asr_model
 from whisperx.audio import load_audio
 from whisperx.diarize import DiarizationPipeline, assign_word_speakers
@@ -316,6 +317,56 @@ def _unload_models() -> None:
     _diarize_pipelines = {}
     gc.collect()
     torch.cuda.empty_cache()
+
+
+def _check_align_offline(language: str, cfg: ModelConfig) -> Optional[str]:
+    """Return a human-readable error string if alignment for *language* cannot be
+    loaded without network access, or None if it should succeed.
+
+    Logic:
+    - A local path override (starts with '/') → check the path exists on disk.
+    - A torchaudio pipeline name            → assume cached (container mounts TORCH_HOME).
+    - A HuggingFace model ID override       → always fails offline.
+    - No override, language in TORCH list   → assume cached.
+    - No override, language in HF list      → will fail offline; return hint.
+    - No override, language unknown         → no model at all; return hint.
+    """
+    model_name = _resolve_align_model_override(language, cfg.align_model)
+
+    if model_name is None:
+        # whisperx will auto-select from its built-in tables
+        if language in DEFAULT_ALIGN_MODELS_TORCH:
+            return None  # torchaudio pipeline — assumed cached in TORCH_HOME
+        if language in DEFAULT_ALIGN_MODELS_HF:
+            hf_id = DEFAULT_ALIGN_MODELS_HF[language]
+            return (
+                f"No local alignment model for language '{language}'. "
+                f"The default model '{hf_id}' requires a HuggingFace download "
+                f"but this server runs offline (HF_HUB_OFFLINE=1). "
+                f"Pass no_align=true to get sentence-level timestamps without word alignment, "
+                f"or download the model and add it to packages.json."
+            )
+        return (
+            f"No alignment model available for language '{language}' "
+            f"(not in whisperx's built-in model list). "
+            f"Pass no_align=true to skip alignment."
+        )
+
+    # Explicit override resolved
+    if model_name.startswith("/"):
+        if not Path(model_name).exists():
+            return f"Alignment model path '{model_name}' does not exist on disk."
+        return None
+
+    if model_name in torchaudio.pipelines.__all__:
+        return None  # torchaudio pipeline — assumed cached
+
+    # HF model ID — will fail offline
+    return (
+        f"Alignment model '{model_name}' is a HuggingFace model ID and cannot be "
+        f"downloaded (server runs offline, HF_HUB_OFFLINE=1). "
+        f"Pass no_align=true to skip alignment."
+    )
 
 
 def _get_align_model(language: str, cfg: ModelConfig):
@@ -1244,6 +1295,17 @@ async def transcribe(
             task = p.get("task", "transcribe")
             verbose = bool(p.get("verbose", False))
             print_prog = bool(p.get("print_progress", False))
+            no_align = bool(p.get("no_align", False))
+            if task == "translate":
+                no_align = True
+
+            # ── pre-flight: alignment availability ───────────────────────────
+            # When the language is known upfront we can reject immediately
+            # rather than making the caller wait for ASR to finish first.
+            if not no_align and language:
+                align_err = _check_align_offline(language, cfg)
+                if align_err:
+                    raise HTTPException(422, align_err)
 
             # ── VAD + ASR ────────────────────────────────────────────────────
             logger.info("Transcribing '%s' (language=%s, task=%s) …", audio.filename, language or "auto", task)
@@ -1261,9 +1323,12 @@ async def transcribe(
             align_language = language or detected_language
 
             # ── alignment ────────────────────────────────────────────────────
-            no_align = bool(p.get("no_align", False))
-            if task == "translate":
-                no_align = True
+            # For auto-detect (language was None) the language is only known now;
+            # run the same offline check before attempting to load the model.
+            if not no_align and not language:
+                align_err = _check_align_offline(align_language, cfg)
+                if align_err:
+                    raise HTTPException(422, align_err)
 
             if not no_align and result.get("segments"):
                 align_model, align_meta = _get_align_model(align_language, cfg)
