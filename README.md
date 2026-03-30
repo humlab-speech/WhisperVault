@@ -576,14 +576,9 @@ Returns the current server state.  Useful for liveness/readiness checks.
 
 ### `GET /models`
 
-Scans the model caches that are mounted into the container – both the
-HuggingFace hub cache (`/models/hf`) **and** the project-local model
-directory (`/models/extra`).  Any subdirectory or HF cache entry is
-reported, and each is classified by its role in the whisperx pipeline.
-
-This makes the API useful for discovering models that were downloaded via
-`huggingface_hub` as well as manually copied CT2 models and other plain
-directories.
+Scans the project-local model directory (`/models/extra`) that is mounted
+into the container.  Any subdirectory is reported, and each is classified
+by its role in the whisperx pipeline (ASR, alignment, diarization, VAD, embedding).
 
 ```bash
 curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/models
