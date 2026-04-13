@@ -21,6 +21,9 @@ Usage examples
     # With speaker diarization, all formats:
     python transcribe.py audio.wav --language sv --diarize
 
+    # Same, but also produce .no_speakers variants without [SPEAKER_XX] tags:
+    python transcribe.py audio.wav --language sv --diarize --strip-speakers
+
     # Multiple formats at once:
     python transcribe.py audio.wav --language sv --format srt txt
 
@@ -33,11 +36,16 @@ Usage examples
     # Check which model is loaded and what models are available:
     python transcribe.py --status
     python transcribe.py --models
+
+    # Strip speaker labels from existing files (no server needed):
+    python transcribe.py --strip output/ZOOM0020_LR.srt
+    python transcribe.py --strip output/            # all srt/txt/vtt in folder
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -89,6 +97,60 @@ def cmd_models(client: httpx.Client) -> None:
         print(f"Alignment pipelines in memory : {', '.join(align_loaded)}")
     if diarize_loaded:
         print(f"Diarization pipelines in memory: {', '.join(diarize_loaded)}")
+
+
+# ── speaker-label stripping ──────────────────────────────────────────────────
+
+# Matches [SPEAKER_00]:  (with the optional trailing space)
+_SPEAKER_RE = re.compile(r"\[SPEAKER_\d+\]:\s?")
+
+
+def strip_speakers(text: str) -> str:
+    """Remove all ``[SPEAKER_XX]: `` tags from *text*."""
+    return _SPEAKER_RE.sub("", text)
+
+
+def _write_stripped(src: Path, dest_dir: Path) -> Path | None:
+    """Strip speaker tags from *src* and write to *dest_dir*.  Returns dest path, or None if no tags found."""
+    content = src.read_text(encoding="utf-8")
+    if not _SPEAKER_RE.search(content):
+        return None
+    cleaned = strip_speakers(content)
+    dest = dest_dir / f"{src.stem}.no_speakers{src.suffix}"
+    dest.write_text(cleaned, encoding="utf-8")
+    return dest
+
+
+def cmd_strip(args: argparse.Namespace) -> None:
+    """Standalone mode: strip speaker labels from existing files on disk."""
+    targets: list[Path] = []
+    for p in args.strip:
+        path = Path(p)
+        if path.is_dir():
+            targets.extend(sorted(path.glob("*.srt")) + sorted(path.glob("*.txt")) + sorted(path.glob("*.vtt")))
+        elif path.is_file():
+            targets.append(path)
+        else:
+            print(f"Not found: {path}", file=sys.stderr)
+
+    if not targets:
+        sys.exit("No .srt/.txt/.vtt files found")
+
+    # Skip files that are already stripped variants
+    targets = [t for t in targets if ".no_speakers" not in t.stem]
+
+    count = 0
+    for src in targets:
+        dest_dir = Path(args.output_dir) if args.output_dir else src.parent
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = _write_stripped(src, dest_dir)
+        if dest:
+            print(f"  {src.name} → {dest.name}", file=sys.stderr)
+            count += 1
+        else:
+            print(f"  {src.name}  (no speaker tags, skipped)", file=sys.stderr)
+
+    print(f"\n{count} file(s) written", file=sys.stderr)
 
 
 def cmd_transcribe(client: httpx.Client, args: argparse.Namespace) -> None:
@@ -167,6 +229,12 @@ def cmd_transcribe(client: httpx.Client, args: argparse.Namespace) -> None:
             out_file = dest_dir / f"{stem}.{fmt}"
             out_file.write_text(content, encoding="utf-8")
             print(f"Written: {out_file}", file=sys.stderr)
+
+            # Produce a speaker-stripped variant alongside the original
+            if args.strip_speakers and fmt in ("srt", "txt", "vtt") and _SPEAKER_RE.search(content):
+                stripped_file = dest_dir / f"{stem}.no_speakers.{fmt}"
+                stripped_file.write_text(strip_speakers(content), encoding="utf-8")
+                print(f"Written: {stripped_file}", file=sys.stderr)
 
 
 def main() -> None:
@@ -248,7 +316,26 @@ def main() -> None:
     parser.add_argument("--max-line-width", dest="max_line_width", type=int, default=None)
     parser.add_argument("--max-line-count", dest="max_line_count", type=int, default=None)
 
+    # ── speaker stripping ────────────────────────────────────────────────────
+    parser.add_argument(
+        "--strip-speakers",
+        dest="strip_speakers",
+        action="store_true",
+        help="Also write .no_speakers.{srt,txt,vtt} variants without [SPEAKER_XX] tags",
+    )
+    parser.add_argument(
+        "--strip",
+        nargs="+",
+        metavar="PATH",
+        help="Strip speaker labels from existing file(s) or folder(s) — no transcription, no server needed",
+    )
+
     args = parser.parse_args()
+
+    # --strip works without a running server
+    if args.strip:
+        cmd_strip(args)
+        return
 
     if not os.path.exists(args.socket):
         sys.exit(
