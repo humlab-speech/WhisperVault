@@ -18,7 +18,7 @@
 #   python container/manage.py start-nginx [--listen-host 0.0.0.0] [--port 8080]
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM nginx:alpine
+FROM nginx:1.30.0-alpine3.23
 
 # Drop the default server block — we replace the entire nginx.conf.
 RUN rm -f /etc/nginx/conf.d/default.conf
