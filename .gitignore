@@ -19,6 +19,9 @@ docs/
 # local startup script - machine-specific, not version controlled
 start.sh
 
+# local NVIDIA driver/CDI management script - machine-specific, not version controlled
+nvidia-update.py
+
 # Python cache directories
 __pycache__/
 *.pyc

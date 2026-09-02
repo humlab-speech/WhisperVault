@@ -65,9 +65,29 @@ def make_client(socket_path: str) -> httpx.Client:
     )
 
 
+def _server_error(r: httpx.Response) -> None:
+    """Print a readable message for a non-200 response and exit."""
+    detail: object = r.text
+    try:
+        body = r.json()
+        if isinstance(body, dict) and "detail" in body:
+            detail = body["detail"]
+    except ValueError:
+        pass
+    if not isinstance(detail, str):
+        detail = json.dumps(detail)
+    msg = f"Server error {r.status_code}: {detail}"
+    if r.status_code == 503:
+        msg += "\nHint: the server may still be loading models — check with:  python transcribe.py --status"
+    elif r.status_code == 500:
+        msg += "\nHint: see the full traceback in the server logs:  podman logs whisperx-server"
+    sys.exit(msg)
+
+
 def cmd_status(client: httpx.Client) -> None:
     r = client.get("/health")
-    r.raise_for_status()
+    if r.status_code != 200:
+        _server_error(r)
     h = r.json()
     print(f"ready       : {h['ready']}")
     print(f"model       : {h['model']}")
@@ -82,7 +102,8 @@ def cmd_status(client: httpx.Client) -> None:
 
 def cmd_models(client: httpx.Client) -> None:
     r = client.get("/models")
-    r.raise_for_status()
+    if r.status_code != 200:
+        _server_error(r)
     data = r.json()
     loaded_asr = data["currently_loaded"]["asr"]
     print(f"{'ROLE':<14} {'MODEL ID':<55} STATUS")
@@ -197,7 +218,7 @@ def cmd_transcribe(client: httpx.Client, args: argparse.Namespace) -> None:
         )
 
     if r.status_code != 200:
-        sys.exit(f"Server error {r.status_code}: {r.text}")
+        _server_error(r)
 
     result = r.json()
     print(

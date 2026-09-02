@@ -191,6 +191,18 @@ def _call_health(socket_dir: str) -> dict | None:
         return None
 
 
+def _status_error_detail(exc: Exception) -> str:
+    """Extract a human-readable detail string from an HTTP error response."""
+    try:
+        body = exc.response.json()
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, str):
+            return detail
+    except Exception:
+        pass
+    return exc.response.text
+
+
 # ── commands ──────────────────────────────────────────────────────────────────
 
 
@@ -406,7 +418,7 @@ def cmd_reload(args) -> int:
             print(json.dumps(r.json(), indent=2))
         return 0
     except httpx.HTTPStatusError as exc:
-        print(f"Server error {exc.response.status_code}: {exc.response.text}", file=sys.stderr)
+        print(f"Server error {exc.response.status_code}: {_status_error_detail(exc)}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -482,7 +494,7 @@ def cmd_transcribe(args) -> int:
         return 0
 
     except httpx.HTTPStatusError as exc:
-        print(f"Server error {exc.response.status_code}: {exc.response.text}", file=sys.stderr)
+        print(f"Server error {exc.response.status_code}: {_status_error_detail(exc)}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

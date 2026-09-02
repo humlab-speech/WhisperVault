@@ -1342,7 +1342,10 @@ async def transcribe(
 
             # ── VAD + ASR ────────────────────────────────────────────────────
             logger.info("Transcribing '%s' (language=%s, task=%s) …", audio.filename, language or "auto", task)
-            audio_array = load_audio(str(audio_path))
+            try:
+                audio_array = load_audio(str(audio_path))
+            except Exception as exc:
+                raise HTTPException(422, f"Could not decode audio file '{audio.filename}': {exc}") from exc
             result = _asr_model.transcribe(
                 audio_array,
                 batch_size=batch_size,
@@ -1364,7 +1367,10 @@ async def transcribe(
                     raise HTTPException(422, align_err)
 
             if not no_align and result.get("segments"):
-                align_model, align_meta = _get_align_model(align_language, cfg)
+                try:
+                    align_model, align_meta = _get_align_model(align_language, cfg)
+                except Exception as exc:
+                    raise HTTPException(422, f"Failed to load alignment model for '{align_language}': {exc}") from exc
                 if align_model is not None:
                     result = align(
                         result["segments"],
@@ -1383,7 +1389,12 @@ async def transcribe(
                     "diarize_model",
                     cfg.diarize_model,
                 )
-                pipeline = _get_diarize_pipeline(diarize_model_name, cfg)
+                try:
+                    pipeline = _get_diarize_pipeline(diarize_model_name, cfg)
+                except Exception as exc:
+                    raise HTTPException(
+                        422, f"Failed to load diarization pipeline '{diarize_model_name}': {exc}"
+                    ) from exc
                 return_emb = bool(p.get("speaker_embeddings", False))
                 diarize_result = pipeline(
                     str(audio_path),
@@ -1436,7 +1447,7 @@ async def transcribe(
             raise
         except Exception as exc:
             logger.exception("Transcription failed")
-            raise HTTPException(500, f"Transcription error: {exc}") from exc
+            raise HTTPException(500, f"Transcription error ({type(exc).__name__}): {exc}") from exc
         finally:
             _transcribing = False
             shutil.rmtree(work_dir, ignore_errors=True)
