@@ -189,6 +189,12 @@ class ModelConfig:
     # ── idle unload ─────────────────────────────────────────────────────────
     idle_timeout: int = field(default_factory=lambda: _env_int("WHISPERX_IDLE_TIMEOUT_SECONDS", 120))
 
+    def __post_init__(self) -> None:
+        # faster-whisper requires None for auto-detect; clients commonly send
+        # "auto" which would otherwise crash the tokenizer at load time.
+        if self.language is not None and str(self.language).lower() in ("auto", "detect"):
+            self.language = None
+
 
 # ── server state ──────────────────────────────────────────────────────────────
 
@@ -319,15 +325,25 @@ def _unload_models() -> None:
     torch.cuda.empty_cache()
 
 
+def _torch_pipeline_cached(pipeline_name: str) -> bool:
+    """True if a torchaudio pipeline's weights exist in the local torch hub cache."""
+    pipeline = getattr(torchaudio.pipelines, pipeline_name, None)
+    path = getattr(pipeline, "_path", None)
+    if not path:
+        return False
+    torch_home = os.environ.get("TORCH_HOME") or str(Path.home() / ".cache" / "torch")
+    return (Path(torch_home) / "hub" / "checkpoints" / path).exists()
+
+
 def _check_align_offline(language: str, cfg: ModelConfig) -> Optional[str]:
     """Return a human-readable error string if alignment for *language* cannot be
     loaded without network access, or None if it should succeed.
 
     Logic:
     - A local path override (starts with '/') → check the path exists on disk.
-    - A torchaudio pipeline name            → assume cached (container mounts TORCH_HOME).
+    - A torchaudio pipeline name            → check the weights are in the torch hub cache.
     - A HuggingFace model ID override       → always fails offline.
-    - No override, language in TORCH list   → assume cached.
+    - No override, language in TORCH list   → check the default pipeline is cached.
     - No override, language in HF list      → will fail offline; return hint.
     - No override, language unknown         → no model at all; return hint.
     """
@@ -336,7 +352,15 @@ def _check_align_offline(language: str, cfg: ModelConfig) -> Optional[str]:
     if model_name is None:
         # whisperx will auto-select from its built-in tables
         if language in DEFAULT_ALIGN_MODELS_TORCH:
-            return None  # torchaudio pipeline — assumed cached in TORCH_HOME
+            if not _torch_pipeline_cached(DEFAULT_ALIGN_MODELS_TORCH[language]):
+                return (
+                    f"No local alignment model for language '{language}'. "
+                    f"The default torchaudio pipeline '{DEFAULT_ALIGN_MODELS_TORCH[language]}' "
+                    f"is not in the torch hub cache and this server runs offline. "
+                    f"Pass no_align=true to get sentence-level timestamps without word alignment, "
+                    f"or download the weights into $TORCH_HOME/hub/checkpoints/."
+                )
+            return None
         if language in DEFAULT_ALIGN_MODELS_HF:
             hf_id = DEFAULT_ALIGN_MODELS_HF[language]
             return (
@@ -359,7 +383,14 @@ def _check_align_offline(language: str, cfg: ModelConfig) -> Optional[str]:
         return None
 
     if model_name in torchaudio.pipelines.__all__:
-        return None  # torchaudio pipeline — assumed cached
+        if not _torch_pipeline_cached(model_name):
+            return (
+                f"Alignment model '{model_name}' is a torchaudio pipeline but its weights "
+                f"are not in the torch hub cache and this server runs offline. "
+                f"Pass no_align=true to skip alignment, "
+                f"or download the weights into $TORCH_HOME/hub/checkpoints/."
+            )
+        return None
 
     # HF model ID — will fail offline
     return (
@@ -784,7 +815,7 @@ _TRANSCRIBE_PARAMS: dict = {
         "default": None,
         "description": (
             "ISO-639-1 language code (e.g. 'sv', 'en', 'de'). "
-            "Pass null or omit to enable automatic language detection. "
+            "Pass null, 'auto', or omit to enable automatic language detection. "
             "Overrides the server-level default set at startup."
         ),
     },
@@ -1292,6 +1323,8 @@ async def transcribe(
             batch_size = p.get("batch_size", cfg.batch_size)
             chunk_size = p.get("chunk_size", cfg.chunk_size)
             language = p.get("language", cfg.language) or None
+            if language and str(language).lower() in ("auto", "detect"):
+                language = None
             task = p.get("task", "transcribe")
             verbose = bool(p.get("verbose", False))
             print_prog = bool(p.get("print_progress", False))
