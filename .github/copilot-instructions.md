@@ -25,9 +25,8 @@ container/
   server.py              FastAPI app that runs *inside* the container
                            GET  /health   GET  /models   GET  /params
                            POST /transcribe               POST /reload
-  manage.py              host-side CLI (start/stop/status/reload/transcribe/
+  manage.py              host-side CLI (start/stop/status/reload/
                            build-nginx/start-nginx/stop-nginx)
-  client.py              thin httpx client library
   nginx/
     Containerfile        builds whisperx-nginx (nginx:alpine)
     nginx.conf           non-root UDS proxy on port 8080

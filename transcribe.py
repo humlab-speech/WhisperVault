@@ -193,8 +193,14 @@ def cmd_transcribe(client: httpx.Client, args: argparse.Namespace) -> None:
         params["max_speakers"] = args.max_speakers
     if args.no_align:
         params["no_align"] = True
+    if args.align_model:
+        params["align_model"] = args.align_model
+    if args.diarize_model:
+        params["diarize_model"] = args.diarize_model
     if args.batch_size is not None:
         params["batch_size"] = args.batch_size
+    if args.chunk_size is not None:
+        params["chunk_size"] = args.chunk_size
 
     # Resolve output formats
     formats = args.format if args.format else ["txt"]
@@ -308,7 +314,10 @@ def main() -> None:
     parser.add_argument(
         "--no-align", dest="no_align", action="store_true", help="Skip forced word-level alignment (faster)"
     )
+    parser.add_argument("--align-model", dest="align_model", default=None, help="Override the alignment model")
+    parser.add_argument("--diarize-model", dest="diarize_model", default=None, help="Override the diarization model")
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=None)
+    parser.add_argument("--chunk-size", dest="chunk_size", type=int, default=None)
 
     # ── output options ───────────────────────────────────────────────────────
     parser.add_argument(
@@ -317,8 +326,8 @@ def main() -> None:
         nargs="+",
         default=None,
         metavar="FMT",
-        choices=["txt", "srt", "vtt", "tsv", "json", "aud"],
-        help="Output format(s): txt srt vtt tsv json aud  (default: txt)",
+        choices=["all", "txt", "srt", "vtt", "tsv", "json", "aud"],
+        help="Output format(s): all txt srt vtt tsv json aud  (default: txt)",
     )
     parser.add_argument(
         "--output-dir",

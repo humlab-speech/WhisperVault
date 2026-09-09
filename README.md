@@ -165,10 +165,7 @@ curl -s http://localhost:8088/transcribe \
 ```
 
 If you prefer Python, the `transcribe.py` client already wraps this logic
-and takes care of sending files and writing multiple formats.  In your own
-script you can replicate the behaviour using `httpx` as shown in the
-`container/client.py` module or simply import and call `container.client.
-transcribe()` around whichever network code you need.
+and takes care of sending files and writing multiple formats.
 
 ### 5 — Switch models without restarting
 
@@ -212,8 +209,7 @@ WhisperVault/
 │   ├── Containerfile           Builds the whisperx-local image (python:3.12-slim base)
 │   ├── server.py               FastAPI server that runs *inside* the container
 │   │                           Listens on a Unix socket, never on a TCP port
-│   ├── manage.py               Host-side CLI: build, start, stop, transcribe, reload
-│   ├── client.py               Thin Python client library for programmatic access
+│   ├── manage.py               Host-side CLI: build, start, stop, reload
 │   └── nginx/
 │       ├── Containerfile       Builds the whisperx-nginx sidecar image (nginx:alpine)
 │       └── nginx.conf          Non-root nginx config: UDS proxy on port 8080
@@ -440,8 +436,8 @@ and prints a ready confirmation.
 
 `manage.py` supports a development mode that bind-mounts selected host source files over the
 copies baked into the container image. Use `--dev` while actively editing `container/` scripts so you
-can iterate without rebuilding the image on every change. In this mode the host files (for example
-`container/server.py` and `container/client.py`) are mounted into the running container and take
+can iterate without rebuilding the image on every change. In this mode the host file
+(`container/server.py`) is mounted into the running container and takes
 precedence over the image contents.
 
 Example workflow:
@@ -520,14 +516,13 @@ python container/manage.py stop-nginx    # stop nginx sidecar
 
 ## Transcribing a file
 
-Via `manage.py` (writes output files to `./output/` by default):
+Via `transcribe.py` (writes output files next to the audio file by default):
 
 ```bash
-python container/manage.py transcribe /path/to/audio.wav \
+python transcribe.py /path/to/audio.wav \
     --language sv \
     --diarize \
-    --output-format srt \
-    --output-dir ./output
+    --format srt
 ```
 
 Via `curl` (returns JSON — use `jq` to extract the formatted text):

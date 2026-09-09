@@ -14,7 +14,6 @@ Subcommands
   stop        Stop and remove the container
   status      Print health / current model info
   reload      Ask the running server to reload with new model config
-  transcribe  Transcribe an audio file and write outputs to disk
 
 Requirements (host):  podman, httpx>=0.23  (pip install httpx)
 #
@@ -289,10 +288,9 @@ def cmd_start(args) -> int:
         # Mount the host-side Python scripts directly into the container so
         # edits take effect on the next restart without a full image rebuild.
         container_dir = os.path.join(_PROJECT_ROOT, "container")
-        for script in ("server.py", "client.py"):
-            host_path = os.path.join(container_dir, script)
-            if os.path.isfile(host_path):
-                podman_cmd += ["-v", f"{host_path}:/app/container/{script}:ro,z"]
+        server_path = os.path.join(container_dir, "server.py")
+        if os.path.isfile(server_path):
+            podman_cmd += ["-v", f"{server_path}:/app/container/server.py:ro,z"]
         print("  [dev] mounting host container/*.py over image copies")
     podman_cmd = podman_cmd + env_args + [IMAGE_NAME]
 
@@ -417,82 +415,6 @@ def cmd_reload(args) -> int:
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         return 0
-    except httpx.HTTPStatusError as exc:
-        print(f"Server error {exc.response.status_code}: {_status_error_detail(exc)}", file=sys.stderr)
-        return 1
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-
-
-def cmd_transcribe(args) -> int:
-    """
-    Send an audio file to the running server and write the formatted
-    outputs to --output-dir on the host.  The container itself never
-    writes to disk.
-    """
-    audio_path = os.path.abspath(args.audio)
-    if not os.path.isfile(audio_path):
-        print(f"error: audio file '{audio_path}' not found", file=sys.stderr)
-        return 1
-
-    # Build per-request params (only include what was explicitly set)
-    params: dict = {}
-    opt_map = {
-        "language": "language",
-        "task": "task",
-        "batch_size": "batch_size",
-        "chunk_size": "chunk_size",
-        "diarize": "diarize",
-        "min_speakers": "min_speakers",
-        "max_speakers": "max_speakers",
-        "diarize_model": "diarize_model",
-        "no_align": "no_align",
-        "align_model": "align_model",
-        "output_format": "output_format",
-        "interpolate_method": "interpolate_method",
-        "return_char_alignments": "return_char_alignments",
-        "speaker_embeddings": "speaker_embeddings",
-        "verbose": "verbose",
-        "print_progress": "print_progress",
-        "highlight_words": "highlight_words",
-        "max_line_width": "max_line_width",
-        "max_line_count": "max_line_count",
-    }
-    for attr, param_key in opt_map.items():
-        val = getattr(args, attr, None)
-        # include booleans only when explicitly True; skip None/False
-        if val is not None and val is not False:
-            params[param_key] = val
-
-    output_dir = Path(args.output_dir or "output")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    audio_basename = Path(audio_path).stem
-
-    httpx = _require_httpx()
-    try:
-        with _client(args.socket_dir, timeout=3600.0) as c:
-            print(f"Sending '{audio_path}' to server …")
-            with open(audio_path, "rb") as f:
-                r = c.post(
-                    "/transcribe",
-                    files={"audio": (os.path.basename(audio_path), f)},
-                    data={"params": json.dumps(params)},
-                )
-            r.raise_for_status()
-            data = r.json()
-
-        print(
-            f"Done in {data.get('duration_seconds', '?')}s  "
-            f"| language: {data.get('language', '?')}  "
-            f"| segments: {len(data.get('segments', []))}"
-        )
-        for fmt, content in data.get("outputs", {}).items():
-            out_file = output_dir / f"{audio_basename}.{fmt}"
-            out_file.write_text(content, encoding="utf-8")
-            print(f"  wrote {out_file}")
-        return 0
-
     except httpx.HTTPStatusError as exc:
         print(f"Server error {exc.response.status_code}: {_status_error_detail(exc)}", file=sys.stderr)
         return 1
@@ -709,7 +631,7 @@ def main() -> None:
         "--dev",
         action="store_true",
         default=False,
-        help="Mount host container/server.py and container/client.py into the container at startup "
+        help="Mount host container/server.py into the container at startup "
         "so code changes take effect on restart without rebuilding the image.",
     )
     p_start.add_argument(
@@ -752,44 +674,6 @@ def main() -> None:
         ),
     )
     _add_model_config_args(p_reload)
-
-    # ── transcribe ────────────────────────────────────────────────────────
-    p_tx = sub.add_parser("transcribe", help="Transcribe an audio file via the running server")
-    p_tx.add_argument("audio", help="Path to the audio file to transcribe")
-    p_tx.add_argument(
-        "-o",
-        "--output-dir",
-        dest="output_dir",
-        default=None,
-        help="Directory to write output files (default: ./output)",
-    )
-    p_tx.add_argument(
-        "-f",
-        "--output-format",
-        dest="output_format",
-        default="all",
-        choices=["all", "srt", "vtt", "txt", "tsv", "json", "aud"],
-    )
-    p_tx.add_argument("--language", default=None)
-    p_tx.add_argument("--task", default=None, choices=["transcribe", "translate"])
-    p_tx.add_argument("--batch-size", dest="batch_size", type=int, default=None)
-    p_tx.add_argument("--chunk-size", dest="chunk_size", type=int, default=None)
-    p_tx.add_argument("--diarize", action="store_true", default=None)
-    p_tx.add_argument("--min-speakers", dest="min_speakers", type=int, default=None)
-    p_tx.add_argument("--max-speakers", dest="max_speakers", type=int, default=None)
-    p_tx.add_argument("--diarize-model", dest="diarize_model", default=None)
-    p_tx.add_argument("--no-align", dest="no_align", action="store_true", default=None)
-    p_tx.add_argument("--align-model", dest="align_model", default=None)
-    p_tx.add_argument(
-        "--interpolate-method", dest="interpolate_method", default=None, choices=["nearest", "linear", "ignore"]
-    )
-    p_tx.add_argument("--return-char-alignments", dest="return_char_alignments", action="store_true", default=None)
-    p_tx.add_argument("--speaker-embeddings", dest="speaker_embeddings", action="store_true", default=None)
-    p_tx.add_argument("--verbose", action="store_true", default=None)
-    p_tx.add_argument("--print-progress", dest="print_progress", action="store_true", default=None)
-    p_tx.add_argument("--highlight-words", dest="highlight_words", action="store_true", default=None)
-    p_tx.add_argument("--max-line-width", dest="max_line_width", type=int, default=None)
-    p_tx.add_argument("--max-line-count", dest="max_line_count", type=int, default=None)
 
     # ── build-nginx ───────────────────────────────────────────────────────
     sub.add_parser(
@@ -842,7 +726,6 @@ def main() -> None:
         "stop": cmd_stop,
         "status": cmd_status,
         "reload": cmd_reload,
-        "transcribe": cmd_transcribe,
         "build-nginx": cmd_build_nginx,
         "start-nginx": cmd_start_nginx,
         "stop-nginx": cmd_stop_nginx,
