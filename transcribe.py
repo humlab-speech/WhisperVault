@@ -109,12 +109,14 @@ def cmd_models(client: httpx.Client) -> None:
         _server_error(r)
     data = r.json()
     # cache_path is the container-side path a client must pass to --model / --align-model /
-    # --diarize-model, so print that rather than the bare directory name.
-    print(f"{'ROLE':<14} {'CONTAINER PATH (pass to --model / --align-model / --diarize-model)':<58} STATUS")
-    print("-" * 90)
+    # --diarize-model, so print that rather than the bare directory name.  The LANGS column
+    # matters for alignment models: a directory is only honoured for a language it declares.
+    print(f"{'ROLE':<14} {'CONTAINER PATH (for --model / --align-model / --diarize-model)':<50} {'LANGS':<17} STATUS")
+    print("-" * 95)
     for m in data["available"]:
         status = "● loaded" if m["loaded"] else ""
-        print(f"{m['role']:<14} {m['cache_path']:<58} {status}")
+        langs = ",".join(m.get("languages", [])) or "-"
+        print(f"{m['role']:<14} {m['cache_path']:<50} {langs:<17} {status}")
     print()
     align_loaded = data["currently_loaded"]["alignment"]
     diarize_loaded = data["currently_loaded"]["diarization"]

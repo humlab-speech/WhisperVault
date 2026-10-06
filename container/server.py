@@ -344,6 +344,21 @@ def _torch_pipeline_cached(pipeline_name: str, model_dir: Optional[str] = None) 
     return (Path(torch_home) / "hub" / "checkpoints" / path).exists()
 
 
+_MODELS_ROOT = "/models/extra"
+
+
+def _model_path_error(path: str) -> Optional[str]:
+    """Error string if a client-supplied local model path is unusable, else None.
+
+    Pure string normalisation, never a stat(): a request parameter must not be
+    usable to probe the container's file tree.  Only /models/extra is mounted,
+    so anything else cannot be a model.
+    """
+    if os.path.normpath(path).startswith(_MODELS_ROOT + os.sep):
+        return None
+    return f"Model paths must be container-side paths under {_MODELS_ROOT} (see GET /models)."
+
+
 def _check_align_offline(language: str, cfg: ModelConfig, align_override: Optional[str] = None) -> Optional[str]:
     """Return a human-readable error string if alignment for *language* cannot be
     loaded without network access, or None if it should succeed.
@@ -352,13 +367,19 @@ def _check_align_offline(language: str, cfg: ModelConfig, align_override: Option
     ``cfg.align_model`` when set.
 
     Logic:
-    - A local path override (starts with '/') → check the path exists on disk.
+    - A local path override (starts with '/') → must be under /models/extra, then on disk.
     - A torchaudio pipeline name            → check the weights are in the torch hub cache.
     - A HuggingFace model ID override       → always fails offline.
     - No override, language in TORCH list   → check the default pipeline is cached.
     - No override, language in HF list      → will fail offline; return hint.
     - No override, language unknown         → no model at all; return hint.
     """
+    # Reject a client path outside the model mount before anything touches the filesystem
+    if align_override and align_override.startswith("/"):
+        path_err = _model_path_error(align_override)
+        if path_err:
+            return path_err + "  Pass no_align=true to skip alignment."
+
     model_name = _resolve_align_model_override(language, align_override or cfg.align_model)
 
     if model_name is None:
@@ -388,17 +409,9 @@ def _check_align_offline(language: str, cfg: ModelConfig, align_override: Option
             f"Pass no_align=true to skip alignment."
         )
 
-    # Explicit override resolved
+    # Explicit override resolved — a local path is already known to be inside
+    # /models/extra; paths under it are safe to name, GET /models lists them anyway.
     if model_name.startswith("/"):
-        # Only /models/extra is mounted into the container, so anything else cannot be
-        # a model.  Checked *before* touching the filesystem: a client-supplied path
-        # must not turn this endpoint into an oracle for the container's file tree.
-        # Paths inside the prefix are fine to report — GET /models already lists them.
-        if not model_name.startswith("/models/extra/"):
-            return (
-                "Alignment model paths must be container-side paths under /models/extra "
-                "(see GET /models); pass no_align=true to skip alignment."
-            )
         if not Path(model_name).is_dir():
             return f"Alignment model path '{model_name}' does not exist on disk."
         return None
@@ -451,6 +464,11 @@ def _resolve_align_model_override(language: str, align_model: Optional[str]) -> 
     right model and return it as-is.
     """
     if not align_model:
+        return None
+    if align_model.startswith("/") and _model_path_error(align_model):
+        # Outside the only model mount: cannot be a model, and we deliberately do not
+        # stat() it (that would make the parameter a file-tree oracle).  Auto-select.
+        logger.warning("ignoring align_model outside %s: %r", _MODELS_ROOT, align_model)
         return None
     if not align_model.startswith("/"):
         # HF model ID — operator explicitly chose it, pass through unchanged
@@ -980,8 +998,8 @@ def _model_config_schema() -> dict:
     _meta: dict[str, dict] = {
         "model": {
             "env": "WHISPERX_MODEL",
-            "description": "Whisper model name or HuggingFace repo ID "
-            "(e.g. 'small', 'large-v2', 'KBLab/kb-whisper-large').",
+            "description": "Whisper model directory as a container-side path under /models/extra "
+            "(see GET /models).  A HuggingFace repo ID only works when the server runs with OFFLINE=0.",
         },
         "device": {
             "env": "WHISPERX_DEVICE",
@@ -1208,6 +1226,9 @@ async def reload_models(body: dict):
     global _reloading, _idle_unloaded, _last_activity
     if _reloading:
         raise HTTPException(503, "Already reloading, please wait")
+    rejected = sorted(set(body) & _SECRET_FIELDS)
+    if rejected:
+        raise HTTPException(400, f"These fields are read from the container environment only: {rejected}")
     async with _lock:
         _reloading = True
         # Remember the current config so we can recover if the new load fails.
@@ -1427,6 +1448,10 @@ async def transcribe(
                     "diarize_model",
                     cfg.diarize_model,
                 )
+                if diarize_model_name.startswith("/"):
+                    path_err = _model_path_error(diarize_model_name)
+                    if path_err:
+                        raise HTTPException(422, path_err)
                 try:
                     pipeline = _get_diarize_pipeline(diarize_model_name, cfg)
                 except Exception as exc:

@@ -402,6 +402,7 @@ def cmd_reload(args) -> int:
         "hotwords",
         "align_model",
         "diarize_model",
+        "idle_timeout",
     ):
         val = getattr(args, attr, None)
         if val is not None:
