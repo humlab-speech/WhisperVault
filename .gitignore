@@ -15,6 +15,7 @@ output/
 # local notes - not version controlled
 docs/
 *.srt
+REBUILD_RETEST.md
 
 # local startup script - machine-specific, not version controlled
 start.sh

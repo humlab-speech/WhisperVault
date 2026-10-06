@@ -174,7 +174,7 @@ and takes care of sending files and writing multiple formats.
 python transcribe.py --models
 
 # Switch the loaded ASR model on the fly:
-python container/manage.py reload --model Systran/faster-whisper-small
+python container/manage.py reload --model whisper-large-v3   # short alias read from models/*/alias
 
 # Or directly via curl:
 curl --unix-socket /tmp/whisperx-api/whisperx.sock \
@@ -493,7 +493,7 @@ Instead, point your existing proxy directly at the Unix socket:
 location /whisperx/ {
     proxy_pass         http://unix:/tmp/whisperx-api/whisperx.sock;
     proxy_read_timeout 3600s;
-    client_max_body_size 2G;
+    client_max_body_size 950M;   # just under the server's 1 000 000 000-byte cap
 }
 ```
 
@@ -609,15 +609,16 @@ curl http://localhost:8088/models
 {
   "available": [
     {
-      "model_id": "/models/extra/kb-whisper-large-ct2",
+      "model_id": "kb-whisper-large-ct2",
+      "cache_path": "/models/extra/kb-whisper-large-ct2",
       "role": "asr",
       "loaded": true,
-      "description": "Swedish-optimised Whisper large model ...",
-      "languages": ["sv"],
-      "architecture": "faster-whisper"
+      "description": "Swedish-optimised Whisper large, fine-tuned by KBLab (CTranslate2 format)",
+      "languages": ["sv"]
     },
     {
-      "model_id": "/models/extra/pyannote-speaker-diarization",
+      "model_id": "pyannote-speaker-diarization",
+      "cache_path": "/models/extra/pyannote-speaker-diarization",
       "role": "diarization",
       "loaded": false
     }
@@ -637,6 +638,10 @@ curl http://localhost:8088/models
 }
 ```
 
+`model_id` is the directory basename (what `manage.py --model` aliases resolve to);
+**`cache_path` is the container-side path to pass** to `--model`, `--align-model` and
+`--diarize-model` or to the matching JSON fields of `POST /reload`.
+
 **Roles:**
 
 | Role | Meaning |
@@ -648,13 +653,50 @@ curl http://localhost:8088/models
 | `embedding` | Speaker embedding model used internally by the diarization pipeline |
 | `unknown` | Present in the cache but not in the server's known-model registry |
 
-To switch to a different ASR model that is listed under `role=asr`, use `POST /reload`:
+To switch to a different ASR model that is listed under `role=asr`, use `POST /reload`
+(with a `cache_path` from the response above — this server is offline, so a bare
+HuggingFace repo ID cannot be downloaded):
 ```bash
 curl --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/reload \
     -H 'Content-Type: application/json' \
-    -d '{"model": "openai/whisper-large-v3"}'
+    -d '{"model": "/models/extra/faster-whisper-large-v3-ct2"}'
 ```
+
+---
+
+### `GET /packages`
+
+Returns the named model bundles defined in `models/packages.json` (mounted at
+`/models/extra/packages.json`).  A package is a coordinated set of `model` /
+`align_model` / `diarize_model` / `language` / `compute_type` values that `POST /reload`
+can apply atomically with `{"package": "<name>"}`; any other reload field included in the
+same body overrides the package value for that reload.
+
+```bash
+curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/packages
+```
+
+**Response** `200 OK`:
+```json
+{
+  "packages": {
+    "sv-standard": {
+      "description": "Swedish — KB Whisper large (CTranslate2) + wav2vec2 alignment + pyannote diarization",
+      "model": "/models/extra/kb-whisper-large-ct2",
+      "align_model": "/models/extra/wav2vec2-large-voxrex-swedish",
+      "diarize_model": "/models/extra/pyannote-speaker-diarization",
+      "language": "sv",
+      "compute_type": "float32",
+      "missing_paths": ["/models/extra/pyannote-speaker-diarization"]
+    }
+  }
+}
+```
+
+`missing_paths` is only present when a declared model path is absent on disk, and secret
+fields (`hf_token`) are never served even if someone puts one in `packages.json`.  The file
+is re-read on every request, so bundles can be edited without restarting the server.
 
 ---
 
@@ -681,12 +723,14 @@ curl http://localhost:8088/params
                        "description": "..." }
   },
   "reload_params": {
-    "model":      { "type": "str", "default": "small", "current_value": "/models/extra/kb-whisper-large-ct2",
+    "model":      { "type": "str", "default": null, "current_value": "/models/extra/kb-whisper-large-ct2",
                     "env_var": "WHISPERX_MODEL", "description": "..." },
     "beam_size":  { "type": "int", "default": 5,       "current_value": 5,
                     "env_var": "WHISPERX_BEAM_SIZE", "description": "..." },
     "repetition_penalty": { "type": "float", "default": 1.0, "current_value": 1.0,
-                    "env_var": "WHISPERX_REPETITION_PENALTY", "description": "Decoding repetition penalty." }
+                    "env_var": "WHISPERX_REPETITION_PENALTY", "description": "Decoding repetition penalty." },
+    "hf_token":   { "type": "str", "default": null,
+                    "env_var": "HF_TOKEN", "description": "..." }
   },
   "output_formats": ["txt", "srt", "vtt", "tsv", "json", "aud"],
   "notes": {
@@ -698,8 +742,9 @@ curl http://localhost:8088/params
 }
 ```
 
-`reload_params` entries always include a `current_value` field showing what is actually loaded
-right now, which differs from `default` when the server was started with non-default flags.
+`reload_params` entries include a `current_value` field for every non-secret parameter,
+showing what is actually loaded right now — which differs from `default` when the server was
+started with non-default flags.
 
 Secret fields (`hf_token`) are listed by name only: their `default` is reported as `null` and no
 `current_value` is attached, so a client can never read the live `HF_TOKEN` back out of the API.
@@ -715,6 +760,9 @@ Multipart form upload.  The two fields are:
 | `audio` | binary file | Audio in any format ffmpeg understands (wav, mp3, m4a, flac, ogg, …) |
 | `params` | JSON string | Optional per-request parameters (see below) |
 
+Uploads larger than 1 000 000 000 bytes are rejected with `413`; through the nginx sidecar the
+request is refused earlier, at 950M.
+
 **`params` fields** (all optional):
 
 | Key | Type | Default | Description |
@@ -724,7 +772,7 @@ Multipart form upload.  The two fields are:
 | `batch_size` | int | 8 | Inference batch size |
 | `chunk_size` | int | 30 | VAD chunk size in seconds |
 | `no_align` | bool | false | Skip forced alignment (word-level timestamps will be absent) |
-| `align_model` | string | auto | Override forced alignment for this request — container-side path (see `GET /models`) or torchaudio pipeline name.  Only applied when the model declares support for the request language |
+| `align_model` | string | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name.  A directory is only used when its `alias` file declares the request language with `# language: <code>`; a missing `alias` file or a non-matching language silently falls back to auto-selection |
 | `interpolate_method` | `"nearest"` \| `"linear"` \| `"ignore"` | `"nearest"` | How to fill gaps in word-level alignment |
 | `return_char_alignments` | bool | false | Include character-level timestamps in output |
 | `diarize` | bool | false | Run speaker diarization and annotate segments with speaker labels |
@@ -785,15 +833,16 @@ Reload is only needed for parameters that are baked in at model-load time: `mode
 curl --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/reload \
     -H 'Content-Type: application/json' \
-    -d '{"model": "large-v2", "beam_size": 10}'
+    -d '{"model": "/models/extra/faster-whisper-large-v3-ct2", "beam_size": 10}'
 ```
 
 **Response** `200 OK`:
 ```json
-{ "status": "reloaded", "model": "large-v2", "device": "cpu", "compute_type": "float32" }
+{ "status": "reloaded", "model": "/models/extra/faster-whisper-large-v3-ct2", "device": "cpu", "compute_type": "float32" }
 ```
 
-Returns `503` if a reload is already in progress, `500` if loading fails.
+Returns `503` if a reload is already in progress, `500` if loading fails (the previous model
+is restored automatically, so a bad reload does not leave the server without a model).
 
 ---
 
@@ -804,19 +853,20 @@ rootless (no root required), it is owned by the current user.
 
 **Socket permissions**
 
-The server explicitly sets `umask(0)` before uvicorn creates the socket, so the socket file is
-created with mode `0666` (readable and writable by everyone).  This is necessary because the nginx
-sidecar runs as uid 101 (`nginx`), which is different from the user who started the whisperx
-container.  Without `0666`, `connect()` would fail with `EACCES`.
+The server explicitly sets `umask(0)` before uvicorn creates the socket.  A Unix socket file
+is created with mode `0777 & ~umask`, so the result is `0777` (`srwxrwxrwx`).  This is
+necessary because the nginx sidecar runs as uid 101 (`nginx`), which is different from the
+user who started the whisperx container: `connect()` requires the **write** bit on the socket
+file, and the default `umask` of `0022` would leave `0755` and fail with `EACCES`.
 
 ```
-srw-rw-rw- 1 tomas tomas 0 ... /tmp/whisperx-api/whisperx.sock
+srwxrwxrwx 1 tomas tomas 0 ... /tmp/whisperx-api/whisperx.sock
 ```
 
 **Who can connect**
 
 Any process running as the same OS user, or any process with write permission on the socket file,
-can connect.  Because the socket is `0666`, any local process can use it — including:
+can connect.  Because the socket is `0777`, any local process can use it — including:
 
 - `curl --unix-socket /tmp/whisperx-api/whisperx.sock …`
 - A Node.js / Python / Go service using the `httpx` / `http.Client` / `axios` unix socket option
@@ -859,7 +909,7 @@ For `POST /transcribe` from Node.js, use a multipart form library (e.g. `form-da
 The running server can switch to a different model without restarting the container:
 
 ```bash
-python container/manage.py reload --model large-v2 --beam-size 10
+python container/manage.py reload --model whisper-large-v3 --beam-size 10
 ```
 
 All cached alignment and diarization pipelines are also invalidated and will be lazily re-loaded on

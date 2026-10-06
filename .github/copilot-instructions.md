@@ -23,7 +23,7 @@ container air-gapped.
 container/
   Containerfile          builds whisperx-local (python:3.12-slim)
   server.py              FastAPI app that runs *inside* the container
-                           GET  /health   GET  /models   GET  /params
+                           GET  /health   GET  /models   GET  /packages   GET  /params
                            POST /transcribe               POST /reload
   manage.py              host-side CLI (start/stop/status/reload/
                            build-nginx/start-nginx/stop-nginx)
@@ -85,11 +85,12 @@ whisper-script/          batch transcription client (separate repo, optional che
   or `--socket-dir`), `transcribe.py` reads `$WHISPERX_SOCKET` (the **socket file**, or `--socket`).
   Setting only one moves only one half of the pair and the client will report "socket not found"
 - Container path: `/run/api/whisperx.sock`
-- The server calls `os.umask(0o000)` before uvicorn creates the socket so
-  the file is `0666` — required for the nginx user (uid 101) to `connect()`
+- The server calls `os.umask(0o000)` before uvicorn creates the socket, and a Unix socket
+  file is created as `0777 & ~umask` → `srwxrwxrwx`.  Required for the nginx user (uid 101)
+  to `connect()` — connect() needs the **write** bit on the socket file
 - `nginx.conf` sets `client_max_body_size 950M`, deliberately just under the server's
-  `_MAX_AUDIO_BYTES` (1 000 000 000 B), so oversized uploads are refused at the proxy
-  instead of being buffered and then rejected by the server
+  `_MAX_AUDIO_BYTES` (1 000 000 000 B ≈ 953 MiB), so oversized uploads are refused at the
+  proxy instead of being streamed all the way to the server before the 413
 
 ### Container security
 - whisperx container: `--network=none --cap-drop=ALL --security-opt=no-new-privileges:true`
@@ -117,8 +118,12 @@ whisper-script/          batch transcription client (separate repo, optional che
 - `ModelConfig` dataclass — all fields settable via env vars; see header docstring
 - `_TRANSCRIBE_PARAMS` dict — static schema for /transcribe per-request params
 - `_SECRET_FIELDS` — ModelConfig fields whose value must never leave the server;
-  `/params` reports them by name only (no `default`, no `current_value`).
-  Add a field here before making it a secret
+  `/params` reports them by name only (no `default`, no `current_value`), `/packages`
+  strips them from `packages.json` echoes, and `/reload` refuses them in the request body
+  (`HF_TOKEN` is env-only).  Add a field here before making it a secret
+- Client-supplied local model paths (per-request `align_model`) must start with
+  `/models/extra/` — the only model mount.  The prefix is checked before the filesystem,
+  so `/transcribe` cannot be used to probe the container's file tree
 - `_read_model_metadata(path)` — reads `# role:` / `# language:` / `# description:` from a model's `alias` file
 - `_scan_extra_models()` — scans `/models/extra` at request time for `/models` endpoint
 - `_model_config_schema()` — introspects `ModelConfig` at request time for `/params`
@@ -243,7 +248,7 @@ test whenever you change `server.py`, the API surface, or package definitions.
 1. The server and nginx sidecar must be running:
    ```bash
    python container/manage.py start --dev --device cpu --compute-type float32
-   python container/manage.py start-nginx          # exposes :8088 on localhost
+   python container/manage.py start-nginx --port 8088   # exposes :8088 on localhost
    ```
 2. `python-dotenv` must be installed in the venv (the script needs it):
    ```bash
