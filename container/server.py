@@ -16,7 +16,7 @@ POST /reload       → JSON body – reload model with new config
 
 Environment variables (all optional – see ModelConfig defaults)
 ----------------------------------------------------------------
-WHISPERX_MODEL               Whisper model name or path  (small)
+WHISPERX_MODEL               Whisper model name or path  (None = start unloaded, wait for /reload)
 WHISPERX_DEVICE              cpu | cuda                  (cpu)
 WHISPERX_DEVICE_INDEX        int                         (0)
 WHISPERX_COMPUTE_TYPE        default | float16 | float32 | int8  (default)
@@ -199,11 +199,15 @@ class ModelConfig:
 
 # Maximum audio upload size accepted by /transcribe. FastAPI/Starlette will
 # buffer uploads in memory (or disk) which can be exploited if unbounded.
-_MAX_AUDIO_BYTES = 1_000_000_000  # 1 GiB
+_MAX_AUDIO_BYTES = 1_000_000_000  # 1 GB (≈ 953 MiB); nginx refuses above this at the edge
 
 _config: Optional[ModelConfig] = None
 _asr_model: Any = None
 _align_models: dict[tuple, tuple] = {}  # (language, model_name|None) → (model, metadata)
+# ponytail: entries are only dropped on reload/idle-unload, so a caller cycling through
+# valid align_model paths grows this.  Bounded in practice by the model directories that
+# actually exist under /models/extra (see the path gate in _check_align_offline).
+# Upgrade path: cap at N entries and evict least recently used.
 _diarize_pipelines: dict[str, Any] = {}  # model_name → DiarizationPipeline
 _ready: bool = False
 _reloading: bool = False
@@ -386,7 +390,16 @@ def _check_align_offline(language: str, cfg: ModelConfig, align_override: Option
 
     # Explicit override resolved
     if model_name.startswith("/"):
-        if not Path(model_name).exists():
+        # Only /models/extra is mounted into the container, so anything else cannot be
+        # a model.  Checked *before* touching the filesystem: a client-supplied path
+        # must not turn this endpoint into an oracle for the container's file tree.
+        # Paths inside the prefix are fine to report — GET /models already lists them.
+        if not model_name.startswith("/models/extra/"):
+            return (
+                "Alignment model paths must be container-side paths under /models/extra "
+                "(see GET /models); pass no_align=true to skip alignment."
+            )
+        if not Path(model_name).is_dir():
             return f"Alignment model path '{model_name}' does not exist on disk."
         return None
 
@@ -804,7 +817,8 @@ async def packages():
 
     annotated: dict = {}
     for name, defn in pkgs.items():
-        entry = dict(defn)
+        # packages.json is echoed back verbatim — never serve a secret stored in it.
+        entry = {k: v for k, v in defn.items() if k not in _SECRET_FIELDS}
         missing = [
             path
             for field in ("model", "align_model", "diarize_model")
@@ -828,7 +842,7 @@ _TRANSCRIBE_PARAMS: dict = {
         "default": None,
         "description": (
             "ISO-639-1 language code (e.g. 'sv', 'en', 'de'). "
-            "Pass null, 'auto', or omit to enable automatic language detection. "
+            "Pass null, 'auto', 'detect', or omit to enable automatic language detection. "
             "Overrides the server-level default set at startup."
         ),
     },
@@ -863,8 +877,10 @@ _TRANSCRIBE_PARAMS: dict = {
     "align_model": {
         "type": "string | null",
         "default": None,
-        "description": "HuggingFace model ID to use for forced alignment. "
-        "Defaults to the best available model for the detected language.",
+        "description": "Forced-alignment model for this request: a container-side directory "
+        "under /models/extra (see GET /models) or a torchaudio pipeline name. "
+        "A local directory is only used when its 'alias' file declares the request language; "
+        "otherwise the best model for that language is auto-selected.",
     },
     "interpolate_method": {
         "type": "string",
@@ -1215,7 +1231,9 @@ async def reload_models(body: dict):
                 current = dataclasses.asdict(_config)
             else:
                 current = dataclasses.asdict(ModelConfig())
-            valid_fields = {f.name for f in dataclasses.fields(ModelConfig)}
+            # Secrets are never accepted from a client: HF_TOKEN comes from the
+            # container environment only.
+            valid_fields = {f.name for f in dataclasses.fields(ModelConfig)} - _SECRET_FIELDS
             current.update({k: v for k, v in body.items() if k in valid_fields})
             new_cfg = ModelConfig(**current)
             _unload_models()

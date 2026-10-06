@@ -108,12 +108,13 @@ def cmd_models(client: httpx.Client) -> None:
     if r.status_code != 200:
         _server_error(r)
     data = r.json()
-    loaded_asr = data["currently_loaded"]["asr"]
-    print(f"{'ROLE':<14} {'MODEL ID':<55} STATUS")
-    print("-" * 80)
+    # cache_path is the container-side path a client must pass to --model / --align-model /
+    # --diarize-model, so print that rather than the bare directory name.
+    print(f"{'ROLE':<14} {'CONTAINER PATH (pass to --model / --align-model / --diarize-model)':<58} STATUS")
+    print("-" * 90)
     for m in data["available"]:
-        status = "● loaded" if m["model_id"] == loaded_asr else ""
-        print(f"{m['role']:<14} {m['model_id']:<55} {status}")
+        status = "● loaded" if m["loaded"] else ""
+        print(f"{m['role']:<14} {m['cache_path']:<58} {status}")
     print()
     align_loaded = data["currently_loaded"]["alignment"]
     diarize_loaded = data["currently_loaded"]["diarization"]
