@@ -595,7 +595,9 @@ Returns the current server state.  Useful for liveness/readiness checks.
 ### `GET /models`
 
 Scans the project-local model directory (`/models/extra`) that is mounted
-into the container.  Any subdirectory is reported, and each is classified
+into the container.  Every subdirectory that looks like a model (contains
+`config.json`, `config.yaml` or an `alias` file — which is what filters out `cache/`)
+is reported, and each is classified
 by its role in the whisperx pipeline (ASR, alignment, diarization, VAD, embedding).
 
 ```bash
@@ -651,7 +653,7 @@ curl http://localhost:8088/models
 | `diarization` | Speaker diarization pipeline; selectable via `diarize_model` in `/transcribe` |
 | `vad` | VAD backbone used internally when `vad_method=pyannote` |
 | `embedding` | Speaker embedding model used internally by the diarization pipeline |
-| `unknown` | Present in the cache but not in the server's known-model registry |
+| `unknown` | Directory has no `alias` file, so no role was declared |
 
 To switch to a different ASR model that is listed under `role=asr`, use `POST /reload`
 (with a `cache_path` from the response above — this server is offline, so a bare
@@ -687,16 +689,22 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock http://localhost/packages
       "align_model": "/models/extra/wav2vec2-large-voxrex-swedish",
       "diarize_model": "/models/extra/pyannote-speaker-diarization",
       "language": "sv",
-      "compute_type": "float32",
-      "missing_paths": ["/models/extra/pyannote-speaker-diarization"]
+      "compute_type": "float32"
     }
   }
 }
 ```
 
-`missing_paths` is only present when a declared model path is absent on disk, and secret
-fields (`hf_token`) are never served even if someone puts one in `packages.json`.  The file
-is re-read on every request, so bundles can be edited without restarting the server.
+Notes on the response and the file behind it:
+
+- `missing_paths` is added to an entry **only** when one of its `model` / `align_model` /
+  `diarize_model` paths does not exist on disk — a cheap pre-flight so a broken bundle is
+  visible before a reload fails.
+- Secret fields (`hf_token`) are stripped from the response even if someone stores one in a
+  bundle, and `POST /reload` rejects them in the request body; `HF_TOKEN` is env-only.
+- `models/packages.json` is **not** tracked in git, so a fresh clone reports
+  `{"packages": {}}`.  Malformed JSON is a `500` with the parse error as detail.
+- The file is re-read on every request: bundles can be edited without restarting the server.
 
 ---
 
@@ -743,8 +751,9 @@ curl http://localhost:8088/params
 ```
 
 `reload_params` entries include a `current_value` field for every non-secret parameter,
-showing what is actually loaded right now — which differs from `default` when the server was
-started with non-default flags.
+showing what is actually loaded right now.  `default` is read from the container's environment,
+so at startup it equals `current_value`; the two only diverge after a `POST /reload` (or an
+external change) moved the server away from what it was started with.
 
 Secret fields (`hf_token`) are listed by name only: their `default` is reported as `null` and no
 `current_value` is attached, so a client can never read the live `HF_TOKEN` back out of the API.
@@ -768,7 +777,7 @@ request is refused earlier, at 950M.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `language` | string / null | server default | ISO-639-1 code, e.g. `"sv"`, `"en"`.  `null`, `"auto"` or `"detect"` = auto-detect |
-| `task` | `"transcribe"` \| `"translate"` | `"transcribe"` | `"translate"` produces English output regardless of source language |
+| `task` | `"transcribe"` \| `"translate"` | `"transcribe"` | `"translate"` produces English output regardless of source language; it also forces `no_align` (word-level timestamps are dropped) |
 | `batch_size` | int | 8 | Inference batch size |
 | `chunk_size` | int | 30 | VAD chunk size in seconds |
 | `no_align` | bool | false | Skip forced alignment (word-level timestamps will be absent) |
@@ -778,7 +787,7 @@ request is refused earlier, at 950M.
 | `diarize` | bool | false | Run speaker diarization and annotate segments with speaker labels |
 | `min_speakers` | int / null | null | Hint for diarization (minimum expected speakers) |
 | `max_speakers` | int / null | null | Hint for diarization (maximum expected speakers) |
-| `diarize_model` | string | `"pyannote/speaker-diarization-community-1"` | Override diarization model |
+| `diarize_model` | string | server default (`WHISPERX_DIARIZE_MODEL`) | Override the diarization pipeline for this request; a local path must live under `/models/extra` |
 | `speaker_embeddings` | bool | false | Return per-speaker embedding vectors in segments |
 | `output_format` | string / list | `"all"` | One of `"txt"`, `"srt"`, `"vtt"`, `"tsv"`, `"json"`, `"aud"`, `"all"`, or a list such as `["srt","txt"]` |
 | `highlight_words` | bool | false | Underline each word as it is spoken (SRT/VTT) |
@@ -924,6 +933,10 @@ the next request that needs them.
 | `whisperx-server` | `none` (no network at all) | `--cap-drop=ALL` | writable (Python process needs `/tmp`) |
 | `whisperx-nginx` | host TCP port | `--cap-drop=ALL` | read-only + tmpfs at `/tmp` |
 
-Neither container runs as root.  Neither container can write to the host filesystem (model mounts
-are `:ro`; the only shared writable path is the socket directory, which contains only the socket
-file itself).
+Neither container can write to the host filesystem (model mounts are `:ro`; the only shared
+writable path is the socket directory, which contains only the socket file itself).
+
+With **rootless** podman both containers run as your own host user: the transcription container
+has no `USER` directive, so it is uid 0 *inside* its own user namespace and an unprivileged host
+user outside it.  The nginx sidecar does set `USER nginx` (uid 101).  Under a rootful podman
+setup the whisperx container would be real root on the host — run it rootless.

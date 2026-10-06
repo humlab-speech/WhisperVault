@@ -119,11 +119,13 @@ whisper-script/          batch transcription client (separate repo, optional che
 - `_TRANSCRIBE_PARAMS` dict — static schema for /transcribe per-request params
 - `_SECRET_FIELDS` — ModelConfig fields whose value must never leave the server;
   `/params` reports them by name only (no `default`, no `current_value`), `/packages`
-  strips them from `packages.json` echoes, and `/reload` refuses them in the request body
+  strips them from `packages.json` echoes, and `/reload` rejects them with HTTP 400
   (`HF_TOKEN` is env-only).  Add a field here before making it a secret
-- Client-supplied local model paths (per-request `align_model`) must start with
-  `/models/extra/` — the only model mount.  The prefix is checked before the filesystem,
-  so `/transcribe` cannot be used to probe the container's file tree
+- Client-supplied local model paths (per-request `align_model` and `diarize_model`) must be
+  under `/models/extra` — the only model mount.  `_model_path_error()` checks this with
+  `os.path.normpath` and **no** filesystem access, so `/transcribe` cannot be used to probe
+  the container's file tree; `_resolve_align_model_override` applies the same gate before it
+  would read an `alias` file
 - `_read_model_metadata(path)` — reads `# role:` / `# language:` / `# description:` from a model's `alias` file
 - `_scan_extra_models()` — scans `/models/extra` at request time for `/models` endpoint
 - `_model_config_schema()` — introspects `ModelConfig` at request time for `/params`
@@ -211,13 +213,19 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock \
 
 ### Reload model without restart
 ```bash
-python container/manage.py reload --model Systran/faster-whisper-small
+python container/manage.py reload --model whisper-large-v3
 # or
+python container/manage.py reload --model kb-whisper-large
+# or (container-side path, as reported by GET /models)
 curl --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/reload \
     -H 'Content-Type: application/json' \
-    -d '{"model": "KBLab/kb-whisper-large"}'
+    -d '{"model": "/models/extra/kb-whisper-large-ct2"}'
 ```
+Bare HuggingFace repo IDs (`KBLab/kb-whisper-large`, `Systran/faster-whisper-small`) are
+**not** loadable: the container runs with `HF_HUB_OFFLINE=1`, so a repo ID that is not already
+a directory under `/models/extra` fails the reload with a 500.  Use an alias from
+`models/*/alias` or a `/models/extra/…` path.
 
 ### Check API surface at runtime
 ```bash
@@ -295,7 +303,8 @@ For quick iteration while editing `container/server.py` or `container/manage.py`
 ```bash
 python container/manage.py start --dev \
     --model /models/extra/kb-whisper-large-ct2 --device cpu --compute-type float32 --language sv
-```You can also start without a model (`--model` is optional) and load one later via `POST /reload`.
+```
+You can also start without a model (`--model` is optional) and load one later via `POST /reload`.
 Once the change works, rebuild the image and start without `--dev` to ensure you’re running the baked-in code:
 ```bash
 podman build -t whisperx-local -f container/Containerfile . && \
