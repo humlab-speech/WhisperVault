@@ -117,15 +117,16 @@ whisper-script/          batch transcription client (separate repo, optional che
 ### server.py internals
 - `ModelConfig` dataclass — all fields settable via env vars; see header docstring
 - `_TRANSCRIBE_PARAMS` dict — static schema for /transcribe per-request params
-- `_SECRET_FIELDS` — ModelConfig fields whose value must never leave the server;
-  `/params` reports them by name only (no `default`, no `current_value`), `/packages`
-  strips them from `packages.json` echoes, and `/reload` rejects them with HTTP 400
-  (`HF_TOKEN` is env-only).  Add a field here before making it a secret
-- Client-supplied local model paths (per-request `align_model` and `diarize_model`) must be
-  under `/models/extra` — the only model mount.  `_model_path_error()` checks this with
-  `os.path.normpath` and **no** filesystem access, so `/transcribe` cannot be used to probe
-  the container's file tree; `_resolve_align_model_override` applies the same gate before it
-  would read an `alias` file
+- `_SECRET_FIELDS` / `_ENV_ONLY_FIELDS` — `hf_token` must never leave the server: `/params`
+  reports it by name (`default: null`, no `current_value`) and `/packages` strips it from
+  `packages.json` echoes.  `_ENV_ONLY_FIELDS` (= secrets + `model_dir`) is additionally
+  rejected with **400** in a `POST /reload` body and filtered out after package expansion,
+  so no request can set the HF token or move the model download/cache root
+- Client-supplied local model paths (per-request `align_model` / `diarize_model`, and
+  `model` / `align_model` / `diarize_model` in `POST /reload`) must be under `/models/extra`
+  — the only model mount.  `_model_path_error()` checks this with `os.path.normpath` and
+  **no** filesystem access, so neither endpoint can be used to probe the container's file tree;
+  `_resolve_align_model_override` applies the same gate before it would read an `alias` file
 - `_read_model_metadata(path)` — reads `# role:` / `# language:` / `# description:` from a model's `alias` file
 - `_scan_extra_models()` — scans `/models/extra` at request time for `/models` endpoint
 - `_model_config_schema()` — introspects `ModelConfig` at request time for `/params`

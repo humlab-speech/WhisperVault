@@ -77,8 +77,8 @@ to `podman logs` instead of waiting forever.  This avoids silent hangs when a
 crash (e.g. GPU driver issue) occurs.  If you request CUDA but it is not
 available (drivers missing, `--gpus` not passed, or CTranslate2 falling back
 silently) the server will exit with a clear error — it will never pretend to be
-on CUDA while actually running on CPU.  You can rerun the same command –
-`--replace` will stop any old instance for you.
+on CUDA while actually running on CPU.  You can rerun the same command — the container is
+always started with podman's `--replace`, so an old `whisperx-server` is stopped for you.
 
 The command polls until the model is loaded (~15–60 s on first run) and prints a ready confirmation.
 The container runs with `--network=none` and `--cap-drop=ALL` — no internet access at any point.
@@ -89,8 +89,8 @@ Only needed if you want to reach the API over TCP from another machine or servic
 Skip this if you are running everything on the same host.
 
 ```bash
-# Localhost only (safe default):
-python container/manage.py start-nginx
+# Localhost only, on the port the rest of this README uses (--port defaults to 8080):
+python container/manage.py start-nginx --port 8088
 
 # Exposed to the network on port 8088:
 python container/manage.py start-nginx --listen-host 0.0.0.0 --port 8088
@@ -170,8 +170,11 @@ and takes care of sending files and writing multiple formats.
 ### 5 — Switch models without restarting
 
 ```bash
-# See what's available:
+# See what's available (container paths + declared languages):
 python transcribe.py --models
+
+# …or from the models directory alone, with no server running:
+python container/manage.py start --list-models
 
 # Switch the loaded ASR model on the fly:
 python container/manage.py reload --model whisper-large-v3   # short alias read from models/*/alias
@@ -453,7 +456,8 @@ python container/manage.py start --dev \
     --device cpu --compute-type float32 --language en
 
 # Edit files under container/ on the host, then stop and restart the container to pick up
-# changes to modules that import at process start. Use --replace to stop the previous instance.
+# changes to modules that import at process start. Starting again replaces the previous
+# instance automatically (podman --replace is always passed).
 python container/manage.py stop
 
 # When you're satisfied with changes, rebuild the image to bake them into the container:
@@ -640,9 +644,9 @@ curl http://localhost:8088/models
 }
 ```
 
-`model_id` is the directory basename (what `manage.py --model` aliases resolve to);
-**`cache_path` is the container-side path to pass** to `--model`, `--align-model` and
-`--diarize-model` or to the matching JSON fields of `POST /reload`.
+`model_id` is the directory basename; **`cache_path` is what to pass** to `--model`,
+`--align-model` and `--diarize-model` or to the matching JSON fields of `POST /reload` —
+and it is also what a `manage.py` alias resolves to.
 
 **Roles:**
 
@@ -653,7 +657,7 @@ curl http://localhost:8088/models
 | `diarization` | Speaker diarization pipeline; selectable via `diarize_model` in `/transcribe` |
 | `vad` | VAD backbone used internally when `vad_method=pyannote` |
 | `embedding` | Speaker embedding model used internally by the diarization pipeline |
-| `unknown` | Directory has no `alias` file, so no role was declared |
+| `unknown` | No `alias` file, or an `alias` file without a `# role:` line |
 
 To switch to a different ASR model that is listed under `role=asr`, use `POST /reload`
 (with a `cache_path` from the response above — this server is offline, so a bare
@@ -731,7 +735,8 @@ curl http://localhost:8088/params
                        "description": "..." }
   },
   "reload_params": {
-    "model":      { "type": "str", "default": null, "current_value": "/models/extra/kb-whisper-large-ct2",
+    "model":      { "type": "str", "default": "/models/extra/kb-whisper-large-ct2",
+                    "current_value": "/models/extra/kb-whisper-large-ct2",
                     "env_var": "WHISPERX_MODEL", "description": "..." },
     "beam_size":  { "type": "int", "default": 5,       "current_value": 5,
                     "env_var": "WHISPERX_BEAM_SIZE", "description": "..." },
@@ -753,7 +758,8 @@ curl http://localhost:8088/params
 `reload_params` entries include a `current_value` field for every non-secret parameter,
 showing what is actually loaded right now.  `default` is read from the container's environment,
 so at startup it equals `current_value`; the two only diverge after a `POST /reload` (or an
-external change) moved the server away from what it was started with.
+external change) moved the server away from what it was started with.  `type` is derived from
+the default value, so an unset optional field reports `"NoneType"` rather than `"str"`.
 
 Secret fields (`hf_token`) are listed by name only: their `default` is reported as `null` and no
 `current_value` is attached, so a client can never read the live `HF_TOKEN` back out of the API.
@@ -781,7 +787,7 @@ request is refused earlier, at 950M.
 | `batch_size` | int | 8 | Inference batch size |
 | `chunk_size` | int | 30 | VAD chunk size in seconds |
 | `no_align` | bool | false | Skip forced alignment (word-level timestamps will be absent) |
-| `align_model` | string | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name.  A directory is only used when its `alias` file declares the request language with `# language: <code>`; a missing `alias` file or a non-matching language silently falls back to auto-selection |
+| `align_model` | string | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name.  Anything outside `/models/extra` is a `422` **before** ASR starts; a directory inside the mount whose `alias` file does not declare the request language (or has no `alias` file at all) silently falls back to auto-selection |
 | `interpolate_method` | `"nearest"` \| `"linear"` \| `"ignore"` | `"nearest"` | How to fill gaps in word-level alignment |
 | `return_char_alignments` | bool | false | Include character-level timestamps in output |
 | `diarize` | bool | false | Run speaker diarization and annotate segments with speaker labels |
@@ -845,13 +851,27 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock \
     -d '{"model": "/models/extra/faster-whisper-large-v3-ct2", "beam_size": 10}'
 ```
 
-**Response** `200 OK`:
+**Response** `200 OK` (the currently active values, so a client can resync its own cache):
 ```json
-{ "status": "reloaded", "model": "/models/extra/faster-whisper-large-v3-ct2", "device": "cpu", "compute_type": "float32" }
+{
+  "status": "reloaded",
+  "model": "/models/extra/faster-whisper-large-v3-ct2",
+  "device": "cpu",
+  "compute_type": "float32",
+  "language": "sv",
+  "align_model": "/models/extra/wav2vec2-large-voxrex-swedish",
+  "diarize_model": "/models/extra/pyannote-speaker-diarization"
+}
 ```
 
-Returns `503` if a reload is already in progress, `500` if loading fails (the previous model
-is restored automatically, so a bad reload does not leave the server without a model).
+Error codes:
+
+| Code | When |
+|---|---|
+| `400` | a secret or env-only field (`hf_token`, `model_dir`) was sent, or `model` / `align_model` / `diarize_model` is an absolute path outside `/models/extra` |
+| `404` | `{"package": "…"}` names a bundle that is not in `packages.json` |
+| `503` | another reload is in progress |
+| `500` | the model failed to load — the previous model is restored automatically, so a bad reload never leaves the server without one |
 
 ---
 
