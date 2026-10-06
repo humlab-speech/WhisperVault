@@ -930,8 +930,10 @@ _TRANSCRIBE_PARAMS: dict = {
     },
     "diarize_model": {
         "type": "string",
-        "default": "pyannote/speaker-diarization-community-1",
-        "description": "HuggingFace model ID for the diarization pipeline. " "Only used when diarize=true.",
+        "default": None,
+        "description": "Diarization pipeline for this request (only used when diarize=true). "
+        "Null = the server default (WHISPERX_DIARIZE_MODEL). A local path must live under "
+        "/models/extra; a HuggingFace repo ID requires the server to run with OFFLINE=0.",
     },
     "speaker_embeddings": {
         "type": "bool",
@@ -983,6 +985,11 @@ _TRANSCRIBE_PARAMS: dict = {
 
 # ModelConfig fields whose value is a secret: listed in /params by name only.
 _SECRET_FIELDS = frozenset({"hf_token"})
+
+# … plus fields a client must never set at all (env/startup only).  model_dir is
+# not secret, but it becomes the download/cache root for every loader, so letting
+# a request move it is not something a request should be able to do.
+_ENV_ONLY_FIELDS = _SECRET_FIELDS | {"model_dir"}
 
 
 def _model_config_schema() -> dict:
@@ -1226,9 +1233,15 @@ async def reload_models(body: dict):
     global _reloading, _idle_unloaded, _last_activity
     if _reloading:
         raise HTTPException(503, "Already reloading, please wait")
-    rejected = sorted(set(body) & _SECRET_FIELDS)
+    rejected = sorted(set(body) & _ENV_ONLY_FIELDS)
     if rejected:
         raise HTTPException(400, f"These fields are read from the container environment only: {rejected}")
+    for field_name in ("model", "align_model", "diarize_model"):
+        value = body.get(field_name)
+        # Same rule as /transcribe: an absolute model path must be inside the one mount,
+        # checked without touching the filesystem, and rejected before a load is attempted.
+        if isinstance(value, str) and value.startswith("/") and (err := _model_path_error(value)):
+            raise HTTPException(400, f"{field_name}: {err}")
     async with _lock:
         _reloading = True
         # Remember the current config so we can recover if the new load fails.
@@ -1252,9 +1265,9 @@ async def reload_models(body: dict):
                 current = dataclasses.asdict(_config)
             else:
                 current = dataclasses.asdict(ModelConfig())
-            # Secrets are never accepted from a client: HF_TOKEN comes from the
-            # container environment only.
-            valid_fields = {f.name for f in dataclasses.fields(ModelConfig)} - _SECRET_FIELDS
+            # Secrets and env-only fields are never accepted from a client, not even via
+            # a packages.json bundle (which is merged into the body above).
+            valid_fields = {f.name for f in dataclasses.fields(ModelConfig)} - _ENV_ONLY_FIELDS
             current.update({k: v for k, v in body.items() if k in valid_fields})
             new_cfg = ModelConfig(**current)
             _unload_models()
@@ -1444,10 +1457,7 @@ async def transcribe(
 
             # ── diarization ──────────────────────────────────────────────────
             if p.get("diarize"):
-                diarize_model_name = p.get(
-                    "diarize_model",
-                    cfg.diarize_model,
-                )
+                diarize_model_name = p.get("diarize_model") or cfg.diarize_model
                 if diarize_model_name.startswith("/"):
                     path_err = _model_path_error(diarize_model_name)
                     if path_err:
