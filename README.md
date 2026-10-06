@@ -5,7 +5,8 @@ timestamps, forced alignment, and speaker diarization — inside a fully network
 
 The core guarantee is simple: once models are downloaded, **the transcription process has zero
 internet access** (`--network=none` in podman).  Model weights are mounted read-only from the host
-filesystem; the container never writes anything to disk.  Communication between the host and the
+filesystem; inside the container only `/tmp` is ever written (the uploaded file, deleted as soon
+as the request finishes).  Communication between the host and the
 container happens exclusively through a **Unix Domain Socket (UDS)** — no TCP port is opened by the
 transcription container itself.
 
@@ -173,7 +174,8 @@ and takes care of sending files and writing multiple formats.
 # See what's available (container paths + declared languages):
 python transcribe.py --models
 
-# …or from the models directory alone, with no server running:
+# …or from the models directory alone, with no server running
+# (run it from the repo root: `start` resolves ./models relative to your cwd):
 python container/manage.py start --list-models
 
 # Switch the loaded ASR model on the fly:
@@ -742,7 +744,7 @@ curl http://localhost:8088/params
                     "env_var": "WHISPERX_BEAM_SIZE", "description": "..." },
     "repetition_penalty": { "type": "float", "default": 1.0, "current_value": 1.0,
                     "env_var": "WHISPERX_REPETITION_PENALTY", "description": "Decoding repetition penalty." },
-    "hf_token":   { "type": "str", "default": null,
+    "hf_token":   { "type": "str", "default": null,          # (shown with HF_TOKEN set; else NoneType)
                     "env_var": "HF_TOKEN", "description": "..." }
   },
   "output_formats": ["txt", "srt", "vtt", "tsv", "json", "aud"],
@@ -787,7 +789,7 @@ request is refused earlier, at 950M.
 | `batch_size` | int | 8 | Inference batch size |
 | `chunk_size` | int | 30 | VAD chunk size in seconds |
 | `no_align` | bool | false | Skip forced alignment (word-level timestamps will be absent) |
-| `align_model` | string | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name.  Anything outside `/models/extra` is a `422` **before** ASR starts; a directory inside the mount whose `alias` file does not declare the request language (or has no `alias` file at all) silently falls back to auto-selection |
+| `align_model` | string | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name.  Anything outside `/models/extra` is a `422` (immediately when `language` is set; with auto-detect only after the language has been detected).  A directory inside the mount whose `alias` file does not declare the request language — or has no `alias` file — silently falls back to auto-selection |
 | `interpolate_method` | `"nearest"` \| `"linear"` \| `"ignore"` | `"nearest"` | How to fill gaps in word-level alignment |
 | `return_char_alignments` | bool | false | Include character-level timestamps in output |
 | `diarize` | bool | false | Run speaker diarization and annotate segments with speaker labels |
@@ -868,10 +870,14 @@ Error codes:
 
 | Code | When |
 |---|---|
-| `400` | a secret or env-only field (`hf_token`, `model_dir`) was sent, or `model` / `align_model` / `diarize_model` is an absolute path outside `/models/extra` |
+| `400` | a secret or env-only field (`hf_token`, `model_dir`) was sent; `model` / `align_model` / `diarize_model` is an absolute path outside `/models/extra`; or `packages.json` could not be parsed |
 | `404` | `{"package": "…"}` names a bundle that is not in `packages.json` |
 | `503` | another reload is in progress |
-| `500` | the model failed to load — the previous model is restored automatically, so a bad reload never leaves the server without one |
+| `500` | the model failed to load — the previous model is restored automatically when there was one, so a bad reload normally leaves the server usable |
+
+The path/secret checks inspect the request **body** only.  A bad absolute model path that comes
+from `packages.json` (an operator-owned file) is not a `400`; it fails later, as a `500` from the
+loader — `GET /packages` reports such paths under `missing_paths` beforehand.
 
 ---
 
@@ -956,7 +962,8 @@ the next request that needs them.
 Neither container can write to the host filesystem (model mounts are `:ro`; the only shared
 writable path is the socket directory, which contains only the socket file itself).
 
-With **rootless** podman both containers run as your own host user: the transcription container
-has no `USER` directive, so it is uid 0 *inside* its own user namespace and an unprivileged host
-user outside it.  The nginx sidecar does set `USER nginx` (uid 101).  Under a rootful podman
-setup the whisperx container would be real root on the host — run it rootless.
+With **rootless** podman nothing runs with host privileges: the transcription container has no
+`USER` directive, so it is uid 0 *inside* its own user namespace and your own host uid outside
+it, while the nginx sidecar's `USER nginx` (uid 101) maps to one of your host **subuids** rather
+than your own uid.  Under a rootful podman setup the whisperx container would be real root on the
+host — run it rootless.
