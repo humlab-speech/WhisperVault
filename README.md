@@ -181,15 +181,15 @@ curl --unix-socket /tmp/whisperx-api/whisperx.sock \
     -X POST http://localhost/reload \
     -H 'Content-Type: application/json' \
     -d '{"model": "/models/extra/faster-whisper-large-v3-ct2"}'
+```
 
-Idle unload and health endpoint
+**Idle unload and the health endpoint**
 
 The server may automatically unload models after a period of inactivity to free memory. When
 that happens the `/health` endpoint reflects the state (it includes `idle_unloaded: true` and
 `idle_timeout_seconds`) and the next `/transcribe` request (or an explicit `POST /reload`) will
 transparently reload the configured model before processing. You can change the idle timeout
 via the reload parameters (or `manage.py reload`) if you need models to stay resident longer.
-```
 
 ### 6 — Stop
 
@@ -209,10 +209,13 @@ WhisperVault/
 │   ├── Containerfile           Builds the whisperx-local image (python:3.12-slim base)
 │   ├── server.py               FastAPI server that runs *inside* the container
 │   │                           Listens on a Unix socket, never on a TCP port
-│   ├── manage.py               Host-side CLI: build, start, stop, reload
+│   ├── manage.py               Host-side CLI: start, stop, status, reload,
+│   │                           plus build-nginx / start-nginx / stop-nginx
 │   └── nginx/
 │       ├── Containerfile       Builds the whisperx-nginx sidecar image (nginx:alpine)
 │       └── nginx.conf          Non-root nginx config: UDS proxy on port 8080
+│
+├── transcribe.py               Host-side CLI client — talks to the socket, writes output files
 │
 ├── models/                     Project-local model cache (not tracked in git)
 │   ├── kb-whisper-large-ct2/   Swedish ASR model (CTranslate2 format)
@@ -228,7 +231,7 @@ WhisperVault/
 ├── whisperx/                   The whisperx Python package (separate git repo / subdir)
 │   └── whisperx/               Package source — installed into the container image
 │
-├── output/                     Transcription results written by manage.py (not tracked)
+├── output/                     Transcription results written by transcribe.py (not tracked)
 ├── input/                      Audio files to transcribe (not tracked)
 │
 └── CLAUDE.md                   Symlink → .github/copilot-instructions.md (agent instructions)
@@ -525,6 +528,22 @@ python transcribe.py /path/to/audio.wav \
     --format srt
 ```
 
+Other useful flags — all are per-request, no `reload` needed:
+
+```bash
+# Every format at once (txt srt vtt tsv json aud):
+python transcribe.py audio.wav --language sv --format all
+
+# Longer VAD chunks:
+python transcribe.py audio.wav --language sv --chunk-size 15
+
+# Pick the alignment / diarization model for this one request.
+# Values are CONTAINER-side paths — run `python transcribe.py --models` to list them:
+python transcribe.py audio.wav --language sv \
+    --align-model /models/extra/wav2vec2-large-voxrex-swedish \
+    --diarize-model /models/extra/pyannote-speaker-diarization
+```
+
 Via `curl` (returns JSON — use `jq` to extract the formatted text):
 
 ```bash
@@ -557,11 +576,15 @@ Returns the current server state.  Useful for liveness/readiness checks.
 {
   "ready": true,
   "reloading": false,
+  "idle_unloaded": false,
+  "idle_timeout_seconds": 120,
   "model": "/models/extra/kb-whisper-large-ct2",
   "device": "cpu",
   "compute_type": "float32",
   "language": "sv",
   "vad_method": "pyannote",
+  "align_model": "/models/extra/wav2vec2-large-voxrex-swedish",
+  "diarize_model": "/models/extra/pyannote-speaker-diarization",
   "align_models_cached": ["sv"],
   "diarize_pipelines_cached": ["/models/extra/pyannote-speaker-diarization"]
 }
@@ -678,6 +701,9 @@ curl http://localhost:8088/params
 `reload_params` entries always include a `current_value` field showing what is actually loaded
 right now, which differs from `default` when the server was started with non-default flags.
 
+Secret fields (`hf_token`) are listed by name only: their `default` is reported as `null` and no
+`current_value` is attached, so a client can never read the live `HF_TOKEN` back out of the API.
+
 ---
 
 ### `POST /transcribe`
@@ -693,12 +719,12 @@ Multipart form upload.  The two fields are:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `language` | string / null | server default | ISO-639-1 code, e.g. `"sv"`, `"en"`.  `null` = auto-detect |
+| `language` | string / null | server default | ISO-639-1 code, e.g. `"sv"`, `"en"`.  `null`, `"auto"` or `"detect"` = auto-detect |
 | `task` | `"transcribe"` \| `"translate"` | `"transcribe"` | `"translate"` produces English output regardless of source language |
 | `batch_size` | int | 8 | Inference batch size |
 | `chunk_size` | int | 30 | VAD chunk size in seconds |
 | `no_align` | bool | false | Skip forced alignment (word-level timestamps will be absent) |
-| `align_model` | string | auto | Override the alignment model (HF path) |
+| `align_model` | string | auto | Override forced alignment for this request — container-side path (see `GET /models`) or torchaudio pipeline name.  Only applied when the model declares support for the request language |
 | `interpolate_method` | `"nearest"` \| `"linear"` \| `"ignore"` | `"nearest"` | How to fill gaps in word-level alignment |
 | `return_char_alignments` | bool | false | Include character-level timestamps in output |
 | `diarize` | bool | false | Run speaker diarization and annotate segments with speaker labels |

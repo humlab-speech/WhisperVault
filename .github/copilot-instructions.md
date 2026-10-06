@@ -80,10 +80,16 @@ whisper-script/          batch transcription client (separate repo, optional che
 - Examples of bad messages: *(adds 42 lines to server.py, removes 3 from manage.py)*
 
 ### Socket
-- Host path: `/tmp/whisperx-api/whisperx.sock` (default, `$WHISPERX_SOCKET`)
+- Host path: `/tmp/whisperx-api/whisperx.sock` (default)
+- Two *different* env vars set it — `manage.py` reads `$WHISPERX_SOCKET_DIR` (the **directory**,
+  or `--socket-dir`), `transcribe.py` reads `$WHISPERX_SOCKET` (the **socket file**, or `--socket`).
+  Setting only one moves only one half of the pair and the client will report "socket not found"
 - Container path: `/run/api/whisperx.sock`
 - The server calls `os.umask(0o000)` before uvicorn creates the socket so
   the file is `0666` — required for the nginx user (uid 101) to `connect()`
+- `nginx.conf` sets `client_max_body_size 950M`, deliberately just under the server's
+  `_MAX_AUDIO_BYTES` (1 000 000 000 B), so oversized uploads are refused at the proxy
+  instead of being buffered and then rejected by the server
 
 ### Container security
 - whisperx container: `--network=none --cap-drop=ALL --security-opt=no-new-privileges:true`
@@ -110,6 +116,9 @@ whisper-script/          batch transcription client (separate repo, optional che
 ### server.py internals
 - `ModelConfig` dataclass — all fields settable via env vars; see header docstring
 - `_TRANSCRIBE_PARAMS` dict — static schema for /transcribe per-request params
+- `_SECRET_FIELDS` — ModelConfig fields whose value must never leave the server;
+  `/params` reports them by name only (no `default`, no `current_value`).
+  Add a field here before making it a secret
 - `_read_model_metadata(path)` — reads `# role:` / `# language:` / `# description:` from a model's `alias` file
 - `_scan_extra_models()` — scans `/models/extra` at request time for `/models` endpoint
 - `_model_config_schema()` — introspects `ModelConfig` at request time for `/params`

@@ -56,6 +56,9 @@ except ImportError:
 
 DEFAULT_SOCKET = os.environ.get("WHISPERX_SOCKET", "/tmp/whisperx-api/whisperx.sock")
 
+# Output formats the server can render (mirrors WRITER_CLASSES in container/server.py).
+ALL_FORMATS = ("txt", "srt", "vtt", "tsv", "json", "aud")
+
 
 def make_client(socket_path: str) -> httpx.Client:
     return httpx.Client(
@@ -203,7 +206,11 @@ def cmd_transcribe(client: httpx.Client, args: argparse.Namespace) -> None:
         params["chunk_size"] = args.chunk_size
 
     # Resolve output formats
-    formats = args.format if args.format else ["txt"]
+    formats = list(args.format) if args.format else ["txt"]
+    if "all" in formats:
+        # 'all' mixed with others must not silently collapse to the others
+        # (the server ignores the literal string "all" inside a list).
+        formats = list(ALL_FORMATS)
     params["output_format"] = formats if len(formats) > 1 else formats[0]
 
     if args.highlight_words:
@@ -314,8 +321,23 @@ def main() -> None:
     parser.add_argument(
         "--no-align", dest="no_align", action="store_true", help="Skip forced word-level alignment (faster)"
     )
-    parser.add_argument("--align-model", dest="align_model", default=None, help="Override the alignment model")
-    parser.add_argument("--diarize-model", dest="diarize_model", default=None, help="Override the diarization model")
+    parser.add_argument(
+        "--align-model",
+        dest="align_model",
+        default=None,
+        metavar="PATH",
+        help="Override forced alignment for this request.  Must be a container-side path "
+        "(see: python transcribe.py --models) or a torchaudio pipeline name — "
+        "a host-relative path like models/foo is not visible to the server.",
+    )
+    parser.add_argument(
+        "--diarize-model",
+        dest="diarize_model",
+        default=None,
+        metavar="PATH",
+        help="Override the speaker diarization pipeline for this request "
+        "(container-side path, see: python transcribe.py --models).",
+    )
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=None)
     parser.add_argument("--chunk-size", dest="chunk_size", type=int, default=None)
 
@@ -326,7 +348,7 @@ def main() -> None:
         nargs="+",
         default=None,
         metavar="FMT",
-        choices=["all", "txt", "srt", "vtt", "tsv", "json", "aud"],
+        choices=["all", *ALL_FORMATS],
         help="Output format(s): all txt srt vtt tsv json aud  (default: txt)",
     )
     parser.add_argument(
