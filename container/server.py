@@ -324,12 +324,18 @@ def _unload_models() -> None:
     torch.cuda.empty_cache()
 
 
-def _torch_pipeline_cached(pipeline_name: str) -> bool:
-    """True if a torchaudio pipeline's weights exist in the local torch hub cache."""
-    pipeline = getattr(torchaudio.pipelines, pipeline_name, None)
-    path = getattr(pipeline, "_path", None)
-    if not path:
-        return False
+def _torch_pipeline_cached(pipeline_name: str, model_dir: Optional[str] = None) -> bool:
+    """True unless a torchaudio pipeline's weights are *provably* missing.
+
+    Deliberately fails open: without a ``_path`` attribute, or when a custom
+    *model_dir* is configured (whisperx hands it to torchaudio as the download
+    root, so $TORCH_HOME is not where the weights live), we cannot verify the
+    cache and must not block a working alignment.  The real load attempt then
+    reports the failure as a 422 with detail instead.
+    """
+    path = getattr(getattr(torchaudio.pipelines, pipeline_name, None), "_path", None)
+    if not path or model_dir:
+        return True
     torch_home = os.environ.get("TORCH_HOME") or str(Path.home() / ".cache" / "torch")
     return (Path(torch_home) / "hub" / "checkpoints" / path).exists()
 
@@ -354,7 +360,7 @@ def _check_align_offline(language: str, cfg: ModelConfig, align_override: Option
     if model_name is None:
         # whisperx will auto-select from its built-in tables
         if language in DEFAULT_ALIGN_MODELS_TORCH:
-            if not _torch_pipeline_cached(DEFAULT_ALIGN_MODELS_TORCH[language]):
+            if not _torch_pipeline_cached(DEFAULT_ALIGN_MODELS_TORCH[language], cfg.model_dir):
                 return (
                     f"No local alignment model for language '{language}'. "
                     f"The default torchaudio pipeline '{DEFAULT_ALIGN_MODELS_TORCH[language]}' "
@@ -385,7 +391,7 @@ def _check_align_offline(language: str, cfg: ModelConfig, align_override: Option
         return None
 
     if model_name in torchaudio.pipelines.__all__:
-        if not _torch_pipeline_cached(model_name):
+        if not _torch_pipeline_cached(model_name, cfg.model_dir):
             return (
                 f"Alignment model '{model_name}' is a torchaudio pipeline but its weights "
                 f"are not in the torch hub cache and this server runs offline. "
@@ -941,6 +947,10 @@ _TRANSCRIBE_PARAMS: dict = {
 }
 
 
+# ModelConfig fields whose value is a secret: listed in /params by name only.
+_SECRET_FIELDS = frozenset({"hf_token"})
+
+
 def _model_config_schema() -> dict:
     """
     Build a parameter schema for POST /reload by introspecting ModelConfig.
@@ -1091,7 +1101,9 @@ def _model_config_schema() -> dict:
     defaults = dataclasses.asdict(ModelConfig())
     for f in dataclasses.fields(ModelConfig):
         entry: dict = {"type": str(f.type) if isinstance(f.type, str) else type(defaults[f.name]).__name__}
-        entry["default"] = defaults[f.name]
+        # Defaults are read from the environment, so a secret field would echo
+        # the live token back to any client that can reach /params.
+        entry["default"] = None if f.name in _SECRET_FIELDS else defaults[f.name]
         meta = _meta.get(f.name, {})
         if "env" in meta:
             entry["env_var"] = meta["env"]
@@ -1136,7 +1148,7 @@ async def params():
     reload_schema = _model_config_schema()
     # Annotate each reload param with its current live value
     for key, entry in reload_schema.items():
-        if key in current_values:
+        if key in current_values and key not in _SECRET_FIELDS:
             entry["current_value"] = current_values[key]
 
     return {
