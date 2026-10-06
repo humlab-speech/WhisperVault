@@ -203,7 +203,7 @@ _MAX_AUDIO_BYTES = 1_000_000_000  # 1 GiB
 
 _config: Optional[ModelConfig] = None
 _asr_model: Any = None
-_align_models: dict[str, tuple] = {}  # language → (model, metadata)
+_align_models: dict[tuple, tuple] = {}  # (language, model_name|None) → (model, metadata)
 _diarize_pipelines: dict[str, Any] = {}  # model_name → DiarizationPipeline
 _ready: bool = False
 _reloading: bool = False
@@ -334,9 +334,12 @@ def _torch_pipeline_cached(pipeline_name: str) -> bool:
     return (Path(torch_home) / "hub" / "checkpoints" / path).exists()
 
 
-def _check_align_offline(language: str, cfg: ModelConfig) -> Optional[str]:
+def _check_align_offline(language: str, cfg: ModelConfig, align_override: Optional[str] = None) -> Optional[str]:
     """Return a human-readable error string if alignment for *language* cannot be
     loaded without network access, or None if it should succeed.
+
+    *align_override* is the per-request align_model param; it wins over
+    ``cfg.align_model`` when set.
 
     Logic:
     - A local path override (starts with '/') → check the path exists on disk.
@@ -346,7 +349,7 @@ def _check_align_offline(language: str, cfg: ModelConfig) -> Optional[str]:
     - No override, language in HF list      → will fail offline; return hint.
     - No override, language unknown         → no model at all; return hint.
     """
-    model_name = _resolve_align_model_override(language, cfg.align_model)
+    model_name = _resolve_align_model_override(language, align_override or cfg.align_model)
 
     if model_name is None:
         # whisperx will auto-select from its built-in tables
@@ -399,10 +402,11 @@ def _check_align_offline(language: str, cfg: ModelConfig) -> Optional[str]:
     )
 
 
-def _get_align_model(language: str, cfg: ModelConfig):
-    if language not in _align_models:
+def _get_align_model(language: str, cfg: ModelConfig, align_override: Optional[str] = None):
+    model_name = _resolve_align_model_override(language, align_override or cfg.align_model)
+    key = (language, model_name)
+    if key not in _align_models:
         logger.info("Loading alignment model for '%s' …", language)
-        model_name = _resolve_align_model_override(language, cfg.align_model)
         if model_name is not None:
             logger.info("  using align_model override: %s", model_name)
         m, meta = load_align_model(
@@ -412,8 +416,8 @@ def _get_align_model(language: str, cfg: ModelConfig):
             model_dir=cfg.model_dir,
             model_cache_only=True,
         )
-        _align_models[language] = (m, meta)
-    return _align_models[language]
+        _align_models[key] = (m, meta)
+    return _align_models[key]
 
 
 def _resolve_align_model_override(language: str, align_model: Optional[str]) -> Optional[str]:
@@ -433,6 +437,10 @@ def _resolve_align_model_override(language: str, align_model: Optional[str]) -> 
         # HF model ID — operator explicitly chose it, pass through unchanged
         return align_model
     # Local path — check alias file for declared language support
+    if not Path(align_model).is_dir():
+        # Surfaces unknown paths so the pre-flight check can report them
+        # clearly instead of silently auto-selecting a different model.
+        return align_model
     meta = _read_model_metadata(Path(align_model))
     declared = meta.get("languages", [])
     if language in declared:
@@ -599,7 +607,7 @@ async def health():
         "vad_method": _config.vad_method if _config else None,
         "align_model": _config.align_model if _config else None,
         "diarize_model": _config.diarize_model if _config else None,
-        "align_models_cached": list(_align_models.keys()),
+        "align_models_cached": sorted({k[0] for k in _align_models}),
         "diarize_pipelines_cached": list(_diarize_pipelines.keys()),
     }
 
@@ -721,7 +729,7 @@ async def models():
         "by_role": by_role,
         "currently_loaded": {
             "asr": _config.model if _config else None,
-            "alignment": list(_align_models.keys()),
+            "alignment": sorted({k[0] for k in _align_models}),
             "diarization": list(_diarize_pipelines.keys()),
         },
     }
@@ -1330,12 +1338,13 @@ async def transcribe(
             no_align = bool(p.get("no_align", False))
             if task == "translate":
                 no_align = True
+            request_align = p.get("align_model") or None
 
             # ── pre-flight: alignment availability ───────────────────────────
             # When the language is known upfront we can reject immediately
             # rather than making the caller wait for ASR to finish first.
             if not no_align and language:
-                align_err = _check_align_offline(language, cfg)
+                align_err = _check_align_offline(language, cfg, request_align)
                 if align_err:
                     raise HTTPException(422, align_err)
 
@@ -1361,13 +1370,13 @@ async def transcribe(
             # For auto-detect (language was None) the language is only known now;
             # run the same offline check before attempting to load the model.
             if not no_align and not language:
-                align_err = _check_align_offline(align_language, cfg)
+                align_err = _check_align_offline(align_language, cfg, request_align)
                 if align_err:
                     raise HTTPException(422, align_err)
 
             if not no_align and result.get("segments"):
                 try:
-                    align_model, align_meta = _get_align_model(align_language, cfg)
+                    align_model, align_meta = _get_align_model(align_language, cfg, request_align)
                 except Exception as exc:
                     raise HTTPException(422, f"Failed to load alignment model for '{align_language}': {exc}") from exc
                 if align_model is not None:
