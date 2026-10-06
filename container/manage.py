@@ -715,7 +715,10 @@ def main() -> None:
         dest="port",
         type=int,
         default=8080,
-        help="TCP port to listen on inside the nginx container (default: 8080)",
+        help=(
+            "Host TCP port to expose (default: 8080).  nginx itself always listens on "
+            "8080 inside the container; this flag only chooses the host-side port."
+        ),
     )
 
     # ── stop-nginx ────────────────────────────────────────────────────────

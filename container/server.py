@@ -1317,13 +1317,15 @@ async def transcribe(
         batch_size          int   (default: server config)
         chunk_size          int   (default: server config)
         no_align            bool  (default: false)
-        align_model         str   (default: auto-selected by language)
+        align_model         str   (default: auto-selected by language; a local path must
+                                    be under /models/extra — see GET /models)
         interpolate_method  "nearest" | "linear" | "ignore"
         return_char_alignments  bool
         diarize             bool
         min_speakers        int
         max_speakers        int
-        diarize_model       str   (default: pyannote/speaker-diarization-community-1)
+        diarize_model       str   (default: server's WHISPERX_DIARIZE_MODEL; a local path
+                                    must be under /models/extra)
         speaker_embeddings  bool
         output_format       "all" | "srt" | "vtt" | "txt" | "tsv" | "json" | "aud"
                             or a list of formats, e.g. ["srt", "txt"]
@@ -1365,6 +1367,13 @@ async def transcribe(
         p = json.loads(params)
     except json.JSONDecodeError as exc:
         raise HTTPException(422, f"Invalid JSON in params: {exc}") from exc
+
+    # These two are used as model IDs / paths.  A non-string would otherwise blow up
+    # with an AttributeError deep inside a loader — after ASR has already run.
+    for key in ("align_model", "diarize_model"):
+        value = p.get(key)
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(422, f"'{key}' must be a string or null, got {type(value).__name__}")
 
     async with _lock:
         _transcribing = True
@@ -1458,7 +1467,7 @@ async def transcribe(
             # ── diarization ──────────────────────────────────────────────────
             if p.get("diarize"):
                 diarize_model_name = p.get("diarize_model") or cfg.diarize_model
-                if diarize_model_name.startswith("/"):
+                if isinstance(diarize_model_name, str) and diarize_model_name.startswith("/"):
                     path_err = _model_path_error(diarize_model_name)
                     if path_err:
                         raise HTTPException(422, path_err)
