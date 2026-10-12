@@ -197,10 +197,13 @@ class ModelConfig:
         # "auto" which would otherwise crash the tokenizer at load time.
         if self.language is not None and str(self.language).lower() in ("auto", "detect"):
             self.language = None
-        # A nulled/emptied diarize model means "server default", never None:
-        # None would stick in the live config and fail every later request.
-        if not self.diarize_model:
+        # A nulled/emptied diarize model means "server default", never None or
+        # blank space: either would stick in the live config and fail every later
+        # request.  Same for a whitespace-only align model.
+        if not (self.diarize_model or "").strip():
             self.diarize_model = _DEFAULT_DIARIZE_MODEL
+        if self.align_model is not None and not self.align_model.strip():
+            self.align_model = None
 
 
 # ── server state ──────────────────────────────────────────────────────────────
@@ -366,9 +369,9 @@ def _model_path_error(path: str) -> Optional[str]:
     Pure string normalisation, never a stat(): a request parameter must not be
     usable to probe the container's file tree.  Only /models/extra is mounted,
     so an absolute path anywhere else cannot be a model.  A relative value is
-    accepted only when it is not a path at all — a HuggingFace repo ID such as
-    "KBLab/kb-whisper-large" — because the loaders do open relative
-    directories, so "../…" would read outside the mount.
+    accepted only when it does not look like a path that escapes (a HuggingFace
+    repo ID such as "KBLab/kb-whisper-large"), because the loaders do open
+    relative directories, so "../…" would read outside the mount.
     """
     norm = os.path.normpath(path)
     if norm.startswith("//"):  # POSIX normpath keeps exactly two leading slashes
@@ -401,7 +404,9 @@ def _model_field_error(field_name: str, value: Any) -> Optional[str]:
         return f"{field_name}: expected a string or null, got {type(value).__name__}"
     if not value.strip():
         return None if field_name in _NULLABLE_MODEL_FIELDS else f"{field_name}: must not be empty"
-    return _model_path_error(value)
+    if err := _model_path_error(value):
+        return f"{field_name}: {err}"  # named, so a multi-field body says which one
+    return None
 
 
 def _check_model_fields(body: dict, status_code: int) -> None:
@@ -419,12 +424,12 @@ def _check_align_offline(language: str, cfg: ModelConfig, align_override: Option
     ``cfg.align_model`` when set.
 
     Logic:
-    - A local path override (starts with '/') → must be under /models/extra, then on disk.
-    - A torchaudio pipeline name            → check the weights are in the torch hub cache.
-    - A HuggingFace model ID override       → always fails offline.
-    - No override, language in TORCH list   → check the default pipeline is cached.
-    - No override, language in HF list      → will fail offline; return hint.
-    - No override, language unknown         → no model at all; return hint.
+    - A path-like override ("/…", "../…", "~/…")  → must be under /models/extra.
+    - A torchaudio pipeline name                   → check the weights are in the torch hub cache.
+    - Any other value (a HuggingFace model ID)     → always fails offline.
+    - No override, language in TORCH list          → check the default pipeline is cached.
+    - No override, language in HF list             → will fail offline; return hint.
+    - No override, language unknown                → no model at all; return hint.
     """
     # Reject a client path outside the model mount before anything touches the filesystem
     if align_override and (path_err := _model_path_error(align_override)):
@@ -1057,8 +1062,12 @@ def _param_type_errors(p: dict) -> list[str]:
             errors.append(f"'{key}' must be {declared}, got {type(value).__name__}")
             continue
         enum = spec.get("enum")
-        if enum and (bad := [v for v in (value if isinstance(value, list) else [value]) if v not in enum]):
-            errors.append(f"'{key}': {bad} not one of {enum}")
+        if enum:
+            if isinstance(value, list) and not value:
+                errors.append(f"'{key}' must not be an empty list")
+                continue
+            if bad := [v for v in (value if isinstance(value, list) else [value]) if v not in enum]:
+                errors.append(f"'{key}': {bad} not one of {enum}")
     return errors
 
 
@@ -1331,6 +1340,8 @@ async def reload_models(body: dict):
             # Fields explicitly supplied in the body take precedence over package defaults.
             if "package" in body:
                 package_name = body.pop("package")
+                if not isinstance(package_name, str):
+                    raise HTTPException(400, f"package: expected a bundle name, got {type(package_name).__name__}")
                 try:
                     pkgs = _load_packages()
                 except ValueError as exc:

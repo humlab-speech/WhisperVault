@@ -187,6 +187,7 @@ for bad in [
     '{"task": "transkribe"}',
     '{"interpolate_method": "sideways"}',
     '{"output_format": ["nope"]}',
+    '{"output_format": []}',
     '{"output_format": "srt,"}',
     '{"align_model": 5}',
     '{"align_model": "/etc/passwd"}',
@@ -194,6 +195,20 @@ for bad in [
 ]:
     code, detail = transcribe(bad)
     expect(422, f"reject {bad}", code, detail)
+
+code, detail = transcribe('{"align_model": 5}')
+assert "align_model" in str(detail), f"422 detail should name the field, got {detail}"
+
+code, detail = reload_({"package": {"injected": 1}})
+expect(400, "reload: a non-string package name is a 400, not a 500 reload cycle", code, detail)
+
+code, detail = reload_({"diarize_model": "   "})
+expect(200, "reload: blank diarize_model is accepted", code, detail)
+expect(
+    srv._DEFAULT_DIARIZE_MODEL,
+    "blank diarize_model resolves to the default, not to '   '",
+    srv._config.diarize_model,
+)
 
 # Well-formed params must still pass the same validator (no false rejections).
 srv._load_packages = lambda: {
