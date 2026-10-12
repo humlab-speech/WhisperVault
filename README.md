@@ -789,7 +789,7 @@ request is refused earlier, at 950M.
 | `batch_size` | int | 8 | Inference batch size |
 | `chunk_size` | int | 30 | VAD chunk size in seconds |
 | `no_align` | bool | false | Skip forced alignment (word-level timestamps will be absent) |
-| `align_model` | string / null | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name; `null` restores auto-selection.  Anything that looks like a path but is not under `/models/extra` — including relative paths such as `../x` — is a `422`, before ASR starts.  A directory inside the mount whose `alias` file does not declare the request language — or has no `alias` file — silently falls back to auto-selection |
+| `align_model` | string / null | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name; `null` restores auto-selection.  A value that looks like a path — absolute (`/…`) or escaping (`../…`, `~/…`) — must be under `/models/extra` or it is a `422` before decoding starts; anything else is read as a HuggingFace repo ID (which cannot be downloaded offline).  A directory inside the mount whose `alias` file does not declare the request language — or has no `alias` file — silently falls back to auto-selection |
 | `interpolate_method` | `"nearest"` \| `"linear"` \| `"ignore"` | `"nearest"` | How to fill gaps in word-level alignment |
 | `return_char_alignments` | bool | false | Include character-level timestamps in output |
 | `diarize` | bool | false | Run speaker diarization and annotate segments with speaker labels |
@@ -804,11 +804,13 @@ request is refused earlier, at 950M.
 | `verbose` | bool | false | Log detailed progress inside the container |
 | `print_progress` | bool | false | Log segment-level progress inside the container |
 
-Every value above is type-checked against this table before the audio is read: a wrong type, an
+Every value above is type-checked against this table before the audio is decoded: a wrong type, an
 unknown `task` / `interpolate_method` / `output_format` value, or a model path outside
-`/models/extra` is a `422` listing the offending keys — never a `500` after a full transcription.
+`/models/extra` is a `422` naming the offending keys — it never costs a completed transcription.
+(The upload itself has already been received by then; what is saved is the decode + ASR run.)
 Other error codes: `413` oversized upload, `503` model not ready or a reload in progress, `500`
-only for genuine failures inside ASR/alignment/diarization.
+for failures inside the request itself (saving the upload, decode, ASR, alignment, diarization,
+formatting).
 
 **Response** `200 OK`:
 ```json
