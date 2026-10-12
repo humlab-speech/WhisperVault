@@ -138,6 +138,12 @@ def _env_bool(key: str, default: bool) -> bool:
     return os.environ.get(key, str(default)).lower() in ("1", "true", "yes")
 
 
+# Fallback diarization pipeline.  Kept as a constant so an empty or explicitly
+# nulled `diarize_model` can resolve back to it instead of to None (which the
+# diarization loader would happily forward to pyannote).
+_DEFAULT_DIARIZE_MODEL = os.environ.get("WHISPERX_DIARIZE_MODEL") or "pyannote/speaker-diarization-community-1"
+
+
 def _env_opt_str(key: str) -> Optional[str]:
     v = os.environ.get(key, "")
     return v if v else None
@@ -157,9 +163,7 @@ class ModelConfig:
     threads: int = field(default_factory=lambda: _env_int("WHISPERX_THREADS", 4))
     model_dir: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_MODEL_DIR"))
     align_model: Optional[str] = field(default_factory=lambda: _env_opt_str("WHISPERX_ALIGN_MODEL"))
-    diarize_model: str = field(
-        default_factory=lambda: os.environ.get("WHISPERX_DIARIZE_MODEL", "pyannote/speaker-diarization-community-1")
-    )
+    diarize_model: str = field(default_factory=lambda: _DEFAULT_DIARIZE_MODEL)
     hf_token: Optional[str] = field(default_factory=lambda: _env_opt_str("HF_TOKEN"))
     # ── ASR / decoding options (baked in at load_model time) ────────────────
     beam_size: int = field(default_factory=lambda: _env_int("WHISPERX_BEAM_SIZE", 5))
@@ -193,6 +197,10 @@ class ModelConfig:
         # "auto" which would otherwise crash the tokenizer at load time.
         if self.language is not None and str(self.language).lower() in ("auto", "detect"):
             self.language = None
+        # A nulled/emptied diarize model means "server default", never None:
+        # None would stick in the live config and fail every later request.
+        if not self.diarize_model:
+            self.diarize_model = _DEFAULT_DIARIZE_MODEL
 
 
 # ── server state ──────────────────────────────────────────────────────────────
@@ -341,22 +349,66 @@ def _torch_pipeline_cached(pipeline_name: str, model_dir: Optional[str] = None) 
     if not path or model_dir:
         return True
     torch_home = os.environ.get("TORCH_HOME") or str(Path.home() / ".cache" / "torch")
-    return (Path(torch_home) / "hub" / "checkpoints" / path).exists()
+    checkpoints = Path(torch_home) / "hub" / "checkpoints"
+    # torch.hub sometimes seeds the weight under its basename rather than the
+    # bundle's (possibly nested) _path, so accept either layout.  Missing
+    # weights are still reported missing.
+    path = str(path)
+    return (checkpoints / path).exists() or (checkpoints / os.path.basename(path)).exists()
 
 
 _MODELS_ROOT = "/models/extra"
 
 
 def _model_path_error(path: str) -> Optional[str]:
-    """Error string if a client-supplied local model path is unusable, else None.
+    """Error string if a client-supplied model path is unusable, else None.
 
     Pure string normalisation, never a stat(): a request parameter must not be
     usable to probe the container's file tree.  Only /models/extra is mounted,
-    so anything else cannot be a model.
+    so an absolute path anywhere else cannot be a model.  A relative value is
+    accepted only when it is not a path at all — a HuggingFace repo ID such as
+    "KBLab/kb-whisper-large" — because the loaders do open relative
+    directories, so "../…" would read outside the mount.
     """
-    if os.path.normpath(path).startswith(_MODELS_ROOT + os.sep):
-        return None
+    norm = os.path.normpath(path)
+    if norm.startswith("//"):  # POSIX normpath keeps exactly two leading slashes
+        norm = norm[1:]
+    if norm.startswith("/"):
+        if norm.startswith(_MODELS_ROOT + "/"):
+            return None
+    elif ".." not in Path(norm).parts and not norm.startswith("~"):
+        return None  # not a path: a HuggingFace repo ID
     return f"Model paths must be container-side paths under {_MODELS_ROOT} (see GET /models)."
+
+
+# null on these means "drop the override, use the server default"; for `model`
+# there is no default to fall back to, so null would silently unload the server.
+_NULLABLE_MODEL_FIELDS = frozenset({"align_model", "diarize_model"})
+
+
+def _model_field_error(field_name: str, value: Any) -> Optional[str]:
+    """Error string for one client-supplied model field, else None.
+
+    Covers model / align_model / diarize_model at every entry point, so /reload
+    and /transcribe cannot drift apart: a value must be null (except for the ASR
+    model), a non-empty string, and — if it looks like a path — inside the mount.
+    """
+    if value is None:
+        if field_name in _NULLABLE_MODEL_FIELDS:
+            return None
+        return f"{field_name}: null would leave the server without a model; omit the key to keep the current one"
+    if not isinstance(value, str):
+        return f"{field_name}: expected a string or null, got {type(value).__name__}"
+    if not value.strip():
+        return None if field_name in _NULLABLE_MODEL_FIELDS else f"{field_name}: must not be empty"
+    return _model_path_error(value)
+
+
+def _check_model_fields(body: dict, status_code: int) -> None:
+    """Raise *status_code* on the first unusable model field in *body*."""
+    for field_name in ("model", "align_model", "diarize_model"):
+        if field_name in body and (err := _model_field_error(field_name, body[field_name])):
+            raise HTTPException(status_code, err)
 
 
 def _check_align_offline(language: str, cfg: ModelConfig, align_override: Optional[str] = None) -> Optional[str]:
@@ -375,10 +427,8 @@ def _check_align_offline(language: str, cfg: ModelConfig, align_override: Option
     - No override, language unknown         → no model at all; return hint.
     """
     # Reject a client path outside the model mount before anything touches the filesystem
-    if align_override and align_override.startswith("/"):
-        path_err = _model_path_error(align_override)
-        if path_err:
-            return path_err + "  Pass no_align=true to skip alignment."
+    if align_override and (path_err := _model_path_error(align_override)):
+        return path_err + "  Pass no_align=true to skip alignment."
 
     model_name = _resolve_align_model_override(language, align_override or cfg.align_model)
 
@@ -465,7 +515,7 @@ def _resolve_align_model_override(language: str, align_model: Optional[str]) -> 
     """
     if not align_model:
         return None
-    if align_model.startswith("/") and _model_path_error(align_model):
+    if _model_path_error(align_model):
         # Outside the only model mount: cannot be a model, and we deliberately do not
         # stat() it (that would make the parameter a file-tree oracle).  Auto-select.
         logger.warning("ignoring align_model outside %s: %r", _MODELS_ROOT, align_model)
@@ -929,7 +979,7 @@ _TRANSCRIBE_PARAMS: dict = {
         "description": "Maximum number of speakers to assume during diarization. " "Only used when diarize=true.",
     },
     "diarize_model": {
-        "type": "string",
+        "type": "string | null",
         "default": None,
         "description": "Diarization pipeline for this request (only used when diarize=true). "
         "Null = the server default (WHISPERX_DIARIZE_MODEL). A local path must live under "
@@ -981,6 +1031,41 @@ _TRANSCRIBE_PARAMS: dict = {
         "description": "Log segment-by-segment progress to the container stdout.",
     },
 }
+
+
+def _param_type_errors(p: dict) -> list[str]:
+    """Type and enum errors in a parsed /transcribe params object.
+
+    Read from _TRANSCRIBE_PARAMS itself, so a parameter is validated as soon as
+    it is documented here.  Catching a wrong type costs one isinstance; letting
+    it through means a loader dies after the whole file has been transcribed.
+    """
+    errors = []
+    for key, spec in _TRANSCRIBE_PARAMS.items():
+        if key not in p:
+            continue
+        value, declared = p[key], spec.get("type", "")
+        if value is None:
+            if "null" not in declared:
+                errors.append(f"'{key}' may not be null (expected {declared})")
+            continue
+        wanted = tuple(
+            t for t, name in ((str, "string"), (int, "int"), (bool, "bool"), (list, "list")) if name in declared
+        )
+        # bool is a subclass of int: True must not pass as a batch size.
+        if not isinstance(value, wanted) or isinstance(value, bool) and bool not in wanted:
+            errors.append(f"'{key}' must be {declared}, got {type(value).__name__}")
+            continue
+        enum = spec.get("enum")
+        if enum and (bad := [v for v in (value if isinstance(value, list) else [value]) if v not in enum]):
+            errors.append(f"'{key}': {bad} not one of {enum}")
+    return errors
+
+
+def _select_formats(raw: Any) -> list[str]:
+    """Expand the output_format param: "all", one format name, or a list of them."""
+    formats = raw if isinstance(raw, list) else [raw]
+    return ALL_FORMATS if "all" in formats else formats
 
 
 # ModelConfig fields whose value is a secret: listed in /params by name only.
@@ -1236,12 +1321,7 @@ async def reload_models(body: dict):
     rejected = sorted(set(body) & _ENV_ONLY_FIELDS)
     if rejected:
         raise HTTPException(400, f"These fields are read from the container environment only: {rejected}")
-    for field_name in ("model", "align_model", "diarize_model"):
-        value = body.get(field_name)
-        # Same rule as /transcribe: an absolute model path must be inside the one mount,
-        # checked without touching the filesystem, and rejected before a load is attempted.
-        if isinstance(value, str) and value.startswith("/") and (err := _model_path_error(value)):
-            raise HTTPException(400, f"{field_name}: {err}")
+    _check_model_fields(body, 400)
     async with _lock:
         _reloading = True
         # Remember the current config so we can recover if the new load fails.
@@ -1259,6 +1339,9 @@ async def reload_models(body: dict):
                     raise HTTPException(404, f"Unknown package '{package_name}'. Available: {list(pkgs)}")
                 pkg_fields = {k: v for k, v in pkgs[package_name].items() if k != "description"}
                 body = {**pkg_fields, **body}  # package defaults; caller's fields win
+                # A packages.json bundle can name model fields too — same rule, same 400,
+                # and still before anything is unloaded.
+                _check_model_fields(body, 400)
 
             # Start from current config, apply only the supplied overrides
             if _config is not None:
@@ -1272,6 +1355,8 @@ async def reload_models(body: dict):
             new_cfg = ModelConfig(**current)
             _unload_models()
             _load_models(new_cfg)
+        except HTTPException:
+            raise  # a rejected request (unknown package, bad field): nothing was touched
         except Exception as exc:
             logger.exception("Reload failed; attempting to restore previous model")
             # Try to restore the previous model so the server stays usable.
@@ -1368,12 +1453,13 @@ async def transcribe(
     except json.JSONDecodeError as exc:
         raise HTTPException(422, f"Invalid JSON in params: {exc}") from exc
 
-    # These two are used as model IDs / paths.  A non-string would otherwise blow up
-    # with an AttributeError deep inside a loader — after ASR has already run.
-    for key in ("align_model", "diarize_model"):
-        value = p.get(key)
-        if value is not None and not isinstance(value, str):
-            raise HTTPException(422, f"'{key}' must be a string or null, got {type(value).__name__}")
+    if not isinstance(p, dict):
+        raise HTTPException(422, f"params must be a JSON object, got {type(p).__name__}")
+    # Types and model paths are cheap to reject here; the same values reaching a
+    # loader fails only after ASR has burned the whole file.
+    if errors := _param_type_errors(p):
+        raise HTTPException(422, "Invalid params: " + "; ".join(errors))
+    _check_model_fields(p, 422)
 
     async with _lock:
         _transcribing = True
@@ -1466,11 +1552,10 @@ async def transcribe(
 
             # ── diarization ──────────────────────────────────────────────────
             if p.get("diarize"):
+                # The request's own diarize_model already went through
+                # _check_model_fields (same mount rule, same 422); cfg's value is
+                # operator-owned and reported by the loader below.
                 diarize_model_name = p.get("diarize_model") or cfg.diarize_model
-                if isinstance(diarize_model_name, str) and diarize_model_name.startswith("/"):
-                    path_err = _model_path_error(diarize_model_name)
-                    if path_err:
-                        raise HTTPException(422, path_err)
                 try:
                     pipeline = _get_diarize_pipeline(diarize_model_name, cfg)
                 except Exception as exc:
@@ -1497,12 +1582,7 @@ async def transcribe(
 
             # ── format outputs ───────────────────────────────────────────────
             raw_fmt = p.get("output_format", "all")
-            if raw_fmt == "all":
-                formats = ALL_FORMATS
-            elif isinstance(raw_fmt, list):
-                formats = raw_fmt
-            else:
-                formats = [raw_fmt]
+            formats = _select_formats(raw_fmt)
 
             writer_args = {
                 "highlight_words": bool(p.get("highlight_words", False)),
