@@ -789,13 +789,13 @@ request is refused earlier, at 950M.
 | `batch_size` | int | 8 | Inference batch size |
 | `chunk_size` | int | 30 | VAD chunk size in seconds |
 | `no_align` | bool | false | Skip forced alignment (word-level timestamps will be absent) |
-| `align_model` | string | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name.  Anything outside `/models/extra` is a `422` (immediately when `language` is set; with auto-detect only after the language has been detected).  A directory inside the mount whose `alias` file does not declare the request language — or has no `alias` file — silently falls back to auto-selection |
+| `align_model` | string / null | auto | Override forced alignment for this request — a container-side directory from `cache_path` (see `GET /models`) or a torchaudio pipeline name; `null` restores auto-selection.  Anything that looks like a path but is not under `/models/extra` — including relative paths such as `../x` — is a `422`, before ASR starts.  A directory inside the mount whose `alias` file does not declare the request language — or has no `alias` file — silently falls back to auto-selection |
 | `interpolate_method` | `"nearest"` \| `"linear"` \| `"ignore"` | `"nearest"` | How to fill gaps in word-level alignment |
 | `return_char_alignments` | bool | false | Include character-level timestamps in output |
 | `diarize` | bool | false | Run speaker diarization and annotate segments with speaker labels |
 | `min_speakers` | int / null | null | Hint for diarization (minimum expected speakers) |
 | `max_speakers` | int / null | null | Hint for diarization (maximum expected speakers) |
-| `diarize_model` | string | server default (`WHISPERX_DIARIZE_MODEL`) | Override the diarization pipeline for this request; a local path must live under `/models/extra` |
+| `diarize_model` | string / null | server default (`WHISPERX_DIARIZE_MODEL`) | Override the diarization pipeline for this request; `null` restores the server default.  A local path must live under `/models/extra` |
 | `speaker_embeddings` | bool | false | Return per-speaker embedding vectors in segments |
 | `output_format` | string / list | `"all"` | One of `"txt"`, `"srt"`, `"vtt"`, `"tsv"`, `"json"`, `"aud"`, `"all"`, or a list such as `["srt","txt"]` |
 | `highlight_words` | bool | false | Underline each word as it is spoken (SRT/VTT) |
@@ -803,6 +803,12 @@ request is refused earlier, at 950M.
 | `max_line_count` | int / null | null | Maximum lines per subtitle block |
 | `verbose` | bool | false | Log detailed progress inside the container |
 | `print_progress` | bool | false | Log segment-level progress inside the container |
+
+Every value above is type-checked against this table before the audio is read: a wrong type, an
+unknown `task` / `interpolate_method` / `output_format` value, or a model path outside
+`/models/extra` is a `422` listing the offending keys — never a `500` after a full transcription.
+Other error codes: `413` oversized upload, `503` model not ready or a reload in progress, `500`
+only for genuine failures inside ASR/alignment/diarization.
 
 **Response** `200 OK`:
 ```json
@@ -870,14 +876,14 @@ Error codes:
 
 | Code | When |
 |---|---|
-| `400` | a secret or env-only field (`hf_token`, `model_dir`) was sent; `model` / `align_model` / `diarize_model` is an absolute path outside `/models/extra`; or `packages.json` could not be parsed |
+| `400` | a secret or env-only field (`hf_token`, `model_dir`) was sent; `model` is null, empty or not a string; `model` / `align_model` / `diarize_model` names a path outside `/models/extra` (also checked for paths supplied **by** `packages.json`); or `packages.json` could not be parsed |
 | `404` | `{"package": "…"}` names a bundle that is not in `packages.json` |
 | `503` | another reload is in progress |
 | `500` | the model failed to load — the previous model is restored automatically when there was one, so a bad reload normally leaves the server usable |
 
-The path/secret checks inspect the request **body** only.  A bad absolute model path that comes
-from `packages.json` (an operator-owned file) is not a `400`; it fails later, as a `500` from the
-loader — `GET /packages` reports such paths under `missing_paths` beforehand.
+Omitting a field keeps its current value; sending `null` for `align_model` or `diarize_model`
+restores the server default (auto-selection and `WHISPERX_DIARIZE_MODEL` respectively).  Sending
+`null` for `model` would leave the server with no model at all, so it is a `400` instead.
 
 ---
 
