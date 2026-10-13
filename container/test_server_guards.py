@@ -209,6 +209,16 @@ expect(
     "blank diarize_model resolves to the default, not to '   '",
     srv._config.diarize_model,
 )
+code, detail = reload_({"align_model": "   "})
+expect(None, "blank align_model at /reload means auto-select", srv._config.align_model)
+code, detail = transcribe('{"align_model": "   ", "language": "en"}')
+assert "HuggingFace" not in str(detail), f"blank align_model must not look like a repo ID: {detail}"
+code, detail = transcribe('{"align_model": "/etc/passwd"}')
+assert str(detail).startswith("align_model:"), f"path errors must name the field, got {detail}"
+
+os.environ["WHISPERX_MODEL"] = "   "
+expect(None, "a whitespace-only WHISPERX_MODEL means unset", srv.ModelConfig().model)
+os.environ.pop("WHISPERX_MODEL")
 
 # Well-formed params must still pass the same validator (no false rejections).
 srv._load_packages = lambda: {

@@ -806,11 +806,11 @@ request is refused earlier, at 950M.
 
 Every value above is type-checked against this table before the audio is decoded: a wrong type, an
 unknown `task` / `interpolate_method` / `output_format` value, or a model path outside
-`/models/extra` is a `422` naming the offending keys — it never costs a completed transcription.
-(The upload itself has already been received by then; what is saved is the decode + ASR run.)
-Other error codes: `413` oversized upload, `503` model not ready or a reload in progress, `500`
-for failures inside the request itself (saving the upload, decode, ASR, alignment, diarization,
-formatting).
+`/models/extra` is a `422` naming the offending key — it never costs a completed transcription.
+Other error codes: `413` oversized upload, `503` model not ready or a reload in progress, `422`
+when a stage cannot run at all (audio undecodable, alignment or diarization model missing or not
+loadable offline), `500` for anything else that goes wrong while handling the request (saving the
+upload, ASR itself, formatting).
 
 **Response** `200 OK`:
 ```json

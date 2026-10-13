@@ -145,8 +145,9 @@ _DEFAULT_DIARIZE_MODEL = os.environ.get("WHISPERX_DIARIZE_MODEL") or "pyannote/s
 
 
 def _env_opt_str(key: str) -> Optional[str]:
-    v = os.environ.get(key, "")
-    return v if v else None
+    # Blank or whitespace-only environment values mean "not set", never a value:
+    # WHISPERX_MODEL="  " would otherwise be handed to the loader as a model name.
+    return (os.environ.get(key) or "").strip() or None
 
 
 @dataclass
@@ -1331,6 +1332,8 @@ async def reload_models(body: dict):
     if rejected:
         raise HTTPException(400, f"These fields are read from the container environment only: {rejected}")
     _check_model_fields(body, 400)
+    if "package" in body and not isinstance(body["package"], str):
+        raise HTTPException(400, f"package: expected a bundle name, got {type(body['package']).__name__}")
     async with _lock:
         _reloading = True
         # Remember the current config so we can recover if the new load fails.
@@ -1339,9 +1342,9 @@ async def reload_models(body: dict):
             # Expand a package shorthand to individual ModelConfig fields.
             # Fields explicitly supplied in the body take precedence over package defaults.
             if "package" in body:
-                package_name = body.pop("package")
-                if not isinstance(package_name, str):
-                    raise HTTPException(400, f"package: expected a bundle name, got {type(package_name).__name__}")
+                package_name = body.pop("package")  # type-checked before the lock
+                if not package_name.strip():
+                    raise HTTPException(400, "package: bundle name must not be empty")
                 try:
                     pkgs = _load_packages()
                 except ValueError as exc:
@@ -1508,7 +1511,7 @@ async def transcribe(
             no_align = bool(p.get("no_align", False))
             if task == "translate":
                 no_align = True
-            request_align = p.get("align_model") or None
+            request_align = (p.get("align_model") or "").strip() or None
 
             # ── pre-flight: alignment availability ───────────────────────────
             # When the language is known upfront we can reject immediately
@@ -1566,7 +1569,7 @@ async def transcribe(
                 # The request's own diarize_model already went through
                 # _check_model_fields (same mount rule, same 422); cfg's value is
                 # operator-owned and reported by the loader below.
-                diarize_model_name = p.get("diarize_model") or cfg.diarize_model
+                diarize_model_name = (p.get("diarize_model") or "").strip() or cfg.diarize_model
                 try:
                     pipeline = _get_diarize_pipeline(diarize_model_name, cfg)
                 except Exception as exc:
