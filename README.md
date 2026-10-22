@@ -903,7 +903,7 @@ user who started the whisperx container: `connect()` requires the **write** bit 
 file, and the default `umask` of `0022` would leave `0755` and fail with `EACCES`.
 
 ```
-srwxrwxrwx 1 tomas tomas 0 ... /tmp/whisperx-api/whisperx.sock
+srwxrwxrwx 1 user group 0 ... /tmp/whisperx-api/whisperx.sock
 ```
 
 **Who can connect**
