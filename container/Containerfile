@@ -1,10 +1,13 @@
 # Containerfile for whisperx offline transcription
 # Build with: podman build -t whisperx-local -f container/Containerfile .
 
-FROM python:3.12.11-slim
+FROM docker.io/library/python:3.12.16-slim-trixie
 
-# system dependencies required by whisperx
+# system dependencies required by whisperx. 'upgrade' first: 'install' only
+# fetches the packages it names, so the rest of the base would stay as old as
+# the tag.
 RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends git ffmpeg curl && \
     rm -rf /var/lib/apt/lists/*
 
